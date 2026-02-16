@@ -93,15 +93,7 @@ npm install
 3. Edit file `.env` dan isi:
 
    ```env
-   TELEGRAM_BOT_TOKEN=8537885645:AAEPjgFQGMUhPcR3Kh_8erBFnzPc5TbzIIk
-   SPREADSHEET_ID=1BXrH-1jb2zwsss5STFwo3HcCcsooTym5R8Gn2NBTHcI
-   SEED_SHEET_NAME=SEED
 
-   # Copy dari credentials.json field "client_email"
-   GOOGLE_SERVICE_ACCOUNT_EMAIL=telegram-bot@PROJECT_ID.iam.gserviceaccount.com
-
-   # Copy dari credentials.json field "private_key" (HARUS dalam 1 line, jangan hapus \\n)
-   GOOGLE_PRIVATE_KEY=-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg...(copy semua)...xxxx\n-----END PRIVATE KEY-----\n
 
    TZ=Asia/Jakarta
    ```
