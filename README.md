@@ -61,7 +61,7 @@ Bot Telegram untuk mencatat transaksi ke Google Sheets secara otomatis.
 
 1. Buka file `credentials.json` yang baru didownload
 2. Copy email yang ada di field `"client_email"` (contoh: `telegram-bot@PROJECT_ID.iam.gserviceaccount.com`)
-3. Buka Google Sheet Anda: https://docs.google.com/spreadsheets/d/1BXrH-1jb2zwsss5STFwo3HcCcsooTym5R8Gn2NBTHcI
+3. Buka Google Sheet Anda: https://docs.google.com/spreadsheets
 4. Klik tombol **"Share"** di kanan atas
 5. Paste email service account tadi
 6. Pastikan permission: **Editor**
