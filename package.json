@@ -1,0 +1,26 @@
+{
+   "name": "bot-note-buy",
+   "version": "1.0.0",
+   "description": "Telegram bot for tracking transactions to Google Sheets",
+   "main": "index.js",
+   "scripts": {
+      "start": "node index.js",
+      "dev": "node index.js"
+   },
+   "keywords": [
+      "telegram",
+      "bot",
+      "google-sheets"
+   ],
+   "author": "",
+   "license": "MIT",
+   "dependencies": {
+      "node-telegram-bot-api": "^0.66.0",
+      "google-spreadsheet": "^4.1.4",
+      "google-auth-library": "^9.15.0",
+      "dotenv": "^16.4.5"
+   },
+   "engines": {
+      "node": ">=18.0.0"
+   }
+}
