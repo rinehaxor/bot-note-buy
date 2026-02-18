@@ -9,8 +9,12 @@ Bot Telegram untuk mencatat transaksi ke Google Sheets secara otomatis.
 - `/add Aplikasi | Jenis | Laba` - Tambah transaksi baru
 - `/today` - Lihat ringkasan transaksi hari ini
 - `/yesterday` - Lihat ringkasan transaksi kemarin
+- `/week` - Lihat ringkasan transaksi minggu ini (Senin-Minggu)
+- `/month` - Lihat ringkasan transaksi bulan ini
 - `/list` - Lihat semua transaksi (semua hari)
 - `/summary` - Ringkasan per aplikasi (jumlah + total)
+- `/top` - Top 5 aplikasi dengan laba tertinggi 🏆
+- `/stats` - Statistik lengkap (rata-rata, rekor, dll)
 - `/edit <nomor> <field> <value>` - Edit entry tertentu
 - `/undo` - Hapus transaksi terakhir
 - `/delete <nomor>` - Hapus transaksi berdasarkan nomor (otomatis renumber)
@@ -128,10 +132,14 @@ Buka Telegram dan kirim pesan ke bot:
 2. `/add Canva | lifetime | 15000` - Tambah data
 3. `/today` - Lihat transaksi hari ini
 4. `/yesterday` - Lihat transaksi kemarin
-5. `/list` - Lihat semua transaksi
-6. `/summary` - Lihat ringkasan per aplikasi
-7. `/edit 3 laba 10000` - Edit laba entry #3
-8. `/undo` - Hapus entry terakhir
-9. `/delete 3` - Hapus entry nomor 3 (otomatis renumber)
+5. `/week` - Lihat transaksi minggu ini
+6. `/month` - Lihat transaksi bulan ini
+7. `/list` - Lihat semua transaksi
+8. `/summary` - Lihat ringkasan per aplikasi
+9. `/top` - Lihat top 5 aplikasi terlaris 🏆
+10.   `/stats` - Lihat statistik lengkap 📊
+11.   `/edit 3 laba 10000` - Edit laba entry #3
+12.   `/undo` - Hapus entry terakhir
+13.   `/delete 3` - Hapus entry nomor 3 (otomatis renumber)
 
 ---
