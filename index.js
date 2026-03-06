@@ -9,6 +9,7 @@ const path = require('path');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SEED_SHEET_NAME = process.env.SEED_SHEET_NAME || 'SEED';
+const SPEND_SHEET_NAME = process.env.SPEND_SHEET_NAME || 'PENGELUARAN';
 const TZ = process.env.TZ || 'Asia/Jakarta';
 
 // Google Service Account credentials
@@ -157,7 +158,9 @@ function formatDate(date = new Date()) {
 bot.onText(/\/start/, (msg) => {
    const chatId = msg.chat.id;
    registerChatId(chatId); // Daftarkan & simpan chat ID
-   const helpText = `Perintah:
+   const helpText = `📋 *Daftar Perintah Bot*
+
+💰 *PEMASUKAN*
 /add Aplikasi | Jenis | Laba
 /today - Transaksi hari ini
 /yesterday - Transaksi kemarin
@@ -168,22 +171,32 @@ bot.onText(/\/start/, (msg) => {
 /top - Top 5 aplikasi terlaris
 /stats - Statistik lengkap
 /edit <nomor> <field> <value>
-/undo
+/undo - Batalkan /add terakhir
 /delete <nomor>
-/help - Tampilkan bantuan
 
-Contoh:
+💸 *PENGELUARAN*
+/spend Kategori | Keterangan | Nominal
+/spendlist - Semua pengeluaran
+/spendtoday - Pengeluaran hari ini
+/spendmonth - Pengeluaran bulan ini
+/spenddelete <nomor> - Hapus pengeluaran
+
+/help - Tampilkan bantuan ini
+
+*Contoh:*
 /add Capcut | 1 bulan | 8000
-/edit 3 laba 10000
-/delete 3`;
+/spend Makan | Beli nasi padang | 15000
+/spend Akun | Beli akun Netflix | 50000`;
 
-   bot.sendMessage(chatId, helpText);
+   bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
 });
 
 // /help
 bot.onText(/\/help/, (msg) => {
    const chatId = msg.chat.id;
-   const helpText = `Perintah:
+   const helpText = `📋 *Daftar Perintah Bot*
+
+💰 *PEMASUKAN*
 /add Aplikasi | Jenis | Laba
 /today - Transaksi hari ini
 /yesterday - Transaksi kemarin
@@ -194,16 +207,24 @@ bot.onText(/\/help/, (msg) => {
 /top - Top 5 aplikasi terlaris
 /stats - Statistik lengkap
 /edit <nomor> <field> <value>
-/undo
+/undo - Batalkan /add terakhir
 /delete <nomor>
+
+💸 *PENGELUARAN*
+/spend Kategori | Keterangan | Nominal
+/spendlist - Semua pengeluaran
+/spendtoday - Pengeluaran hari ini
+/spendmonth - Pengeluaran bulan ini
+/spenddelete <nomor> - Hapus pengeluaran
+
 /help - Tampilkan bantuan ini
 
-Contoh:
+*Contoh:*
 /add Capcut | 1 bulan | 8000
-/edit 3 laba 10000
-/delete 3`;
+/spend Makan | Beli nasi padang | 15000
+/spend Akun | Beli akun Netflix | 50000`;
 
-   bot.sendMessage(chatId, helpText);
+   bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
 });
 
 // /add
@@ -919,6 +940,287 @@ bot.onText(/\/delete\s+(\d+)/, async (msg, match) => {
    } catch (error) {
       console.error('Error deleting row:', error);
       bot.sendMessage(chatId, '❌ Gagal menghapus data. Error: ' + error.message);
+   }
+});
+
+// ===== PENGELUARAN HELPERS =====
+function parseSpend(text) {
+   const raw = text.slice(6).trim(); // setelah "/spend"
+   const parts = raw
+      .split('|')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+   if (parts.length < 3) return { ok: false };
+
+   const kategori = parts[0];
+   const keterangan = parts[1];
+   const nominal = parseIDR(parts[2]);
+
+   if (!kategori || !keterangan || !isFinite(nominal) || nominal <= 0) {
+      return { ok: false };
+   }
+
+   return { ok: true, kategori, keterangan, nominal };
+}
+
+async function getOrCreateSpendSheet(doc) {
+   let sheet = doc.sheetsByTitle[SPEND_SHEET_NAME];
+   if (sheet) return sheet;
+
+   // Buat sheet baru jika belum ada
+   sheet = await doc.addSheet({
+      title: SPEND_SHEET_NAME,
+      headerValues: ['No', 'Tanggal', 'Kategori', 'Keterangan', 'Nominal'],
+   });
+   return sheet;
+}
+
+function getNextSpendNo(rows) {
+   if (rows.length === 0) return 1;
+   const lastRow = rows[rows.length - 1];
+   const lastNo = parseInt(lastRow.get('No') || lastRow._rawData[0]);
+   if (!isNaN(lastNo) && lastNo > 0) return lastNo + 1;
+   return rows.length + 1;
+}
+
+// ===== PENGELUARAN COMMANDS =====
+
+// /spend - Input pengeluaran
+// Contoh:
+//   /spend Makan | Beli nasi padang | 15000
+//   /spend Akun | Beli akun Netflix | 50000
+//   /spend Transport | Naik ojol ke kantor | 20000
+//   /spend Belanja | Beli sembako bulanan | 200000
+//   /spend Tagihan | Bayar listrik | 250000
+bot.onText(/\/spend (.+)/, async (msg, match) => {
+   const chatId = msg.chat.id;
+   const userId = msg.from.id;
+   const text = msg.text;
+
+   registerChatId(chatId);
+
+   try {
+      const parsed = parseSpend(text);
+
+      if (!parsed.ok) {
+         return bot.sendMessage(
+            chatId,
+            '❌ Format salah.\nPakai:\n/spend Kategori | Keterangan | Nominal\n\n*Contoh:*\n/spend Makan | Beli nasi padang | 15000\n/spend Akun | Beli akun Netflix | 50000\n/spend Transport | Naik ojol | 20000\n/spend Tagihan | Bayar listrik | 250000\n/spend Belanja | Beli sembako | 200000',
+            { parse_mode: 'Markdown' },
+         );
+      }
+
+      const doc = await getSheet();
+      const sheet = await getOrCreateSpendSheet(doc);
+
+      const rows = await sheet.getRows();
+      const nextNo = getNextSpendNo(rows);
+      const tanggal = formatDate();
+
+      await sheet.addRow({
+         No: nextNo,
+         Tanggal: tanggal,
+         Kategori: parsed.kategori,
+         Keterangan: parsed.keterangan,
+         Nominal: parsed.nominal,
+      });
+
+      const senderName = msg.from.first_name || msg.from.username || 'Seseorang';
+
+      bot.sendMessage(chatId, `✅ Pengeluaran dicatat #${nextNo}\n📅 ${tanggal}\n🏷️ ${parsed.kategori} | ${parsed.keterangan}\n💸 ${formatIDR(parsed.nominal)}`);
+
+      // Broadcast ke chat lain
+      const notifText = `🔔 *Pengeluaran baru oleh ${senderName}*\n#${nextNo} | ${tanggal}\n${parsed.kategori} | ${parsed.keterangan} | ${formatIDR(parsed.nominal)}`;
+      for (const id of activeChatIds) {
+         if (id !== chatId) {
+            bot.sendMessage(id, notifText, { parse_mode: 'Markdown' }).catch(() => {
+               activeChatIds.delete(id);
+               saveChatIds();
+            });
+         }
+      }
+   } catch (error) {
+      console.error('Error adding spend:', error);
+      bot.sendMessage(chatId, '❌ Gagal mencatat pengeluaran. Error: ' + error.message);
+   }
+});
+
+// /spendlist - Semua pengeluaran
+bot.onText(/\/spendlist/, async (msg) => {
+   const chatId = msg.chat.id;
+
+   try {
+      const doc = await getSheet();
+      const sheet = await getOrCreateSpendSheet(doc);
+      const rows = await sheet.getRows();
+
+      if (rows.length === 0) {
+         return bot.sendMessage(chatId, '💸 Belum ada data pengeluaran.');
+      }
+
+      let total = 0;
+      const lines = [];
+
+      for (const row of rows) {
+         const no = row.get('No') || row._rawData[0];
+         const tanggal = row.get('Tanggal') || row._rawData[1];
+         const kategori = row.get('Kategori') || row._rawData[2];
+         const keterangan = row.get('Keterangan') || row._rawData[3];
+         const nominal = parseIDR(row.get('Nominal') || row._rawData[4]);
+
+         total += nominal;
+         lines.push(`#${no} ${tanggal} | ${kategori} | ${keterangan} | ${formatIDR(nominal)}`);
+      }
+
+      bot.sendMessage(chatId, `💸 Semua Pengeluaran [${SPEND_SHEET_NAME}]\n${lines.join('\n')}\n\nTotal: ${formatIDR(total)}`);
+   } catch (error) {
+      console.error('Error getting spendlist:', error);
+      bot.sendMessage(chatId, '❌ Gagal mengambil data. Error: ' + error.message);
+   }
+});
+
+// /spendtoday - Pengeluaran hari ini
+bot.onText(/\/spendtoday/, async (msg) => {
+   const chatId = msg.chat.id;
+
+   try {
+      const doc = await getSheet();
+      const sheet = await getOrCreateSpendSheet(doc);
+      const rows = await sheet.getRows();
+      const today = formatDate();
+
+      let total = 0;
+      const lines = [];
+      const kategoriTotals = {};
+
+      for (const row of rows) {
+         const tanggal = row.get('Tanggal') || row._rawData[1];
+         if (tanggal !== today) continue;
+
+         const no = row.get('No') || row._rawData[0];
+         const kategori = row.get('Kategori') || row._rawData[2];
+         const keterangan = row.get('Keterangan') || row._rawData[3];
+         const nominal = parseIDR(row.get('Nominal') || row._rawData[4]);
+
+         total += nominal;
+         lines.push(`#${no} ${kategori} | ${keterangan} | ${formatIDR(nominal)}`);
+
+         if (!kategoriTotals[kategori]) kategoriTotals[kategori] = 0;
+         kategoriTotals[kategori] += nominal;
+      }
+
+      if (lines.length === 0) {
+         return bot.sendMessage(chatId, `💸 Belum ada pengeluaran hari ini (${today}).`);
+      }
+
+      // Breakdown per kategori
+      const kategoriLines = Object.entries(kategoriTotals)
+         .sort((a, b) => b[1] - a[1])
+         .map(([k, v]) => `  • ${k}: ${formatIDR(v)}`)
+         .join('\n');
+
+      bot.sendMessage(chatId, `💸 Pengeluaran Hari Ini (${today})\n${lines.join('\n')}\n\n━━━━━━━━━━━━━━━\nTotal: ${formatIDR(total)}\n\n📊 Per Kategori:\n${kategoriLines}`);
+   } catch (error) {
+      console.error('Error getting spendtoday:', error);
+      bot.sendMessage(chatId, '❌ Gagal mengambil data. Error: ' + error.message);
+   }
+});
+
+// /spendmonth - Pengeluaran bulan ini
+bot.onText(/\/spendmonth/, async (msg) => {
+   const chatId = msg.chat.id;
+
+   try {
+      const doc = await getSheet();
+      const sheet = await getOrCreateSpendSheet(doc);
+      const rows = await sheet.getRows();
+
+      const now = new Date();
+      const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+      const monthEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+
+      let total = 0;
+      const lines = [];
+      const kategoriTotals = {};
+
+      for (const row of rows) {
+         const tanggal = row.get('Tanggal') || row._rawData[1];
+         if (!tanggal) continue;
+
+         const [d, m, y] = tanggal.split('/');
+         const rowDate = new Date(y, m - 1, d);
+
+         if (rowDate >= monthStart && rowDate <= monthEnd) {
+            const no = row.get('No') || row._rawData[0];
+            const kategori = row.get('Kategori') || row._rawData[2];
+            const keterangan = row.get('Keterangan') || row._rawData[3];
+            const nominal = parseIDR(row.get('Nominal') || row._rawData[4]);
+
+            total += nominal;
+            lines.push(`#${no} ${tanggal} | ${kategori} | ${keterangan} | ${formatIDR(nominal)}`);
+
+            if (!kategoriTotals[kategori]) kategoriTotals[kategori] = 0;
+            kategoriTotals[kategori] += nominal;
+         }
+      }
+
+      if (lines.length === 0) {
+         const bulanArr = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+         return bot.sendMessage(chatId, `💸 Belum ada pengeluaran bulan ${bulanArr[now.getMonth()]} ${now.getFullYear()}.`);
+      }
+
+      const bulanArr = ['Januari', 'Februari', 'Maret', 'April', 'Mei', 'Juni', 'Juli', 'Agustus', 'September', 'Oktober', 'November', 'Desember'];
+      const monthName = bulanArr[now.getMonth()];
+
+      const kategoriLines = Object.entries(kategoriTotals)
+         .sort((a, b) => b[1] - a[1])
+         .map(([k, v]) => `  • ${k}: ${formatIDR(v)}`)
+         .join('\n');
+
+      bot.sendMessage(chatId, `💸 Pengeluaran ${monthName} ${now.getFullYear()}\n${lines.join('\n')}\n\n━━━━━━━━━━━━━━━\nTotal: ${formatIDR(total)}\nTransaksi: ${lines.length}x\n\n📊 Per Kategori:\n${kategoriLines}`);
+   } catch (error) {
+      console.error('Error getting spendmonth:', error);
+      bot.sendMessage(chatId, '❌ Gagal mengambil data. Error: ' + error.message);
+   }
+});
+
+// /spenddelete <nomor> - Hapus pengeluaran
+bot.onText(/\/spenddelete\s+(\d+)/, async (msg, match) => {
+   const chatId = msg.chat.id;
+   const targetNo = parseInt(match[1]);
+
+   try {
+      const doc = await getSheet();
+      const sheet = await getOrCreateSpendSheet(doc);
+      const rows = await sheet.getRows();
+
+      const rowToDelete = rows.find((row) => {
+         const no = parseInt(row.get('No') || row._rawData[0]);
+         return no === targetNo;
+      });
+
+      if (!rowToDelete) {
+         return bot.sendMessage(chatId, `❌ Pengeluaran #${targetNo} tidak ditemukan.`);
+      }
+
+      const deletedKategori = rowToDelete.get('Kategori') || rowToDelete._rawData[2];
+      const deletedKet = rowToDelete.get('Keterangan') || rowToDelete._rawData[3];
+      const deletedNominal = parseIDR(rowToDelete.get('Nominal') || rowToDelete._rawData[4]);
+
+      await rowToDelete.delete();
+
+      // Renumber remaining rows
+      const remainingRows = await sheet.getRows();
+      for (let i = 0; i < remainingRows.length; i++) {
+         remainingRows[i].set('No', i + 1);
+         await remainingRows[i].save();
+      }
+
+      bot.sendMessage(chatId, `🗑️ Pengeluaran #${targetNo} dihapus\n${deletedKategori} | ${deletedKet} | ${formatIDR(deletedNominal)}\n\nSisa ${remainingRows.length} pengeluaran (sudah di-renumber)`);
+   } catch (error) {
+      console.error('Error deleting spend:', error);
+      bot.sendMessage(chatId, '❌ Gagal menghapus pengeluaran. Error: ' + error.message);
    }
 });
 
