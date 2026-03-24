@@ -1260,13 +1260,18 @@ function parseEmail(text) {
 
 async function getOrCreateEmailSheet(doc) {
    let sheet = doc.sheetsByTitle[EMAIL_SHEET_NAME];
-   if (sheet) return sheet;
+   if (!sheet) {
+      // Buat sheet baru jika belum ada
+      sheet = await doc.addSheet({
+         title: EMAIL_SHEET_NAME,
+         headerValues: ['No', 'Akun', 'Password', 'Keterangan'],
+      });
+      return sheet;
+   }
 
-   // Buat sheet baru jika belum ada
-   sheet = await doc.addSheet({
-      title: EMAIL_SHEET_NAME,
-      headerValues: ['No', 'Akun', 'Password', 'Keterangan'],
-   });
+   // Sheet sudah ada, load header dari row 2 (row 1 = title "AKUN GMAIL")
+   await sheet.loadHeaderRow(2);
+
    return sheet;
 }
 
