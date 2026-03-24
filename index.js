@@ -10,6 +10,7 @@ const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SEED_SHEET_NAME = process.env.SEED_SHEET_NAME || 'SEED';
 const SPEND_SHEET_NAME = process.env.SPEND_SHEET_NAME || 'PENGELUARAN';
+const EMAIL_SHEET_NAME = process.env.EMAIL_SHEET_NAME || 'EmailNew';
 const TZ = process.env.TZ || 'Asia/Jakarta';
 
 // Google Service Account credentials
@@ -181,12 +182,18 @@ bot.onText(/\/start/, (msg) => {
 /spendmonth - Pengeluaran bulan ini
 /spenddelete <nomor> - Hapus pengeluaran
 
+📧 *EMAIL*
+/email Akun | Password | Keterangan
+/emaillist - Semua email tercatat
+/emailedit <nomor> <field> <value>
+/emaildelete <nomor> - Hapus email
+
 /help - Tampilkan bantuan ini
 
 *Contoh:*
 /add Capcut | 1 bulan | 8000
 /spend Makan | Beli nasi padang | 15000
-/spend Akun | Beli akun Netflix | 50000`;
+/email test@gmail.com | pass123 | Email utama`;
 
    bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
 });
@@ -217,12 +224,18 @@ bot.onText(/\/help/, (msg) => {
 /spendmonth - Pengeluaran bulan ini
 /spenddelete <nomor> - Hapus pengeluaran
 
+📧 *EMAIL*
+/email Akun | Password | Keterangan
+/emaillist - Semua email tercatat
+/emailedit <nomor> <field> <value>
+/emaildelete <nomor> - Hapus email
+
 /help - Tampilkan bantuan ini
 
 *Contoh:*
 /add Capcut | 1 bulan | 8000
 /spend Makan | Beli nasi padang | 15000
-/spend Akun | Beli akun Netflix | 50000`;
+/email test@gmail.com | pass123 | Email utama`;
 
    bot.sendMessage(chatId, helpText, { parse_mode: 'Markdown' });
 });
@@ -1221,6 +1234,215 @@ bot.onText(/\/spenddelete\s+(\d+)/, async (msg, match) => {
    } catch (error) {
       console.error('Error deleting spend:', error);
       bot.sendMessage(chatId, '❌ Gagal menghapus pengeluaran. Error: ' + error.message);
+   }
+});
+
+// ===== EMAIL HELPERS =====
+function parseEmail(text) {
+   const raw = text.slice(6).trim(); // setelah "/email"
+   const parts = raw
+      .split('|')
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+   if (parts.length < 3) return { ok: false };
+
+   const akun = parts[0];
+   const password = parts[1];
+   const keterangan = parts[2];
+
+   if (!akun || !password || !keterangan) {
+      return { ok: false };
+   }
+
+   return { ok: true, akun, password, keterangan };
+}
+
+async function getOrCreateEmailSheet(doc) {
+   let sheet = doc.sheetsByTitle[EMAIL_SHEET_NAME];
+   if (sheet) return sheet;
+
+   // Buat sheet baru jika belum ada
+   sheet = await doc.addSheet({
+      title: EMAIL_SHEET_NAME,
+      headerValues: ['No', 'Akun', 'Password', 'Keterangan'],
+   });
+   return sheet;
+}
+
+function getNextEmailNo(rows) {
+   if (rows.length === 0) return 1;
+   const lastRow = rows[rows.length - 1];
+   const lastNo = parseInt(lastRow.get('No') || lastRow._rawData[0]);
+   if (!isNaN(lastNo) && lastNo > 0) return lastNo + 1;
+   return rows.length + 1;
+}
+
+// ===== EMAIL COMMANDS =====
+
+// /email - Catat email baru
+// Contoh:
+//   /email test@gmail.com | password123 | Email utama
+//   /email akun@yahoo.com | pass456 | Email cadangan
+bot.onText(/\/email\s+(.+)/, async (msg, match) => {
+   const chatId = msg.chat.id;
+   const text = msg.text;
+
+   registerChatId(chatId);
+
+   try {
+      const parsed = parseEmail(text);
+
+      if (!parsed.ok) {
+         return bot.sendMessage(
+            chatId,
+            '❌ Format salah.\nPakai:\n/email Akun | Password | Keterangan\n\n*Contoh:*\n/email test@gmail.com | password123 | Email utama\n/email akun@yahoo.com | pass456 | Email cadangan',
+            { parse_mode: 'Markdown' },
+         );
+      }
+
+      const doc = await getSheet();
+      const sheet = await getOrCreateEmailSheet(doc);
+
+      const rows = await sheet.getRows();
+      const nextNo = getNextEmailNo(rows);
+
+      await sheet.addRow({
+         No: nextNo,
+         Akun: parsed.akun,
+         Password: parsed.password,
+         Keterangan: parsed.keterangan,
+      });
+
+      const senderName = msg.from.first_name || msg.from.username || 'Seseorang';
+
+      bot.sendMessage(chatId, `✅ Email dicatat #${nextNo}\n📧 ${parsed.akun}\n🔑 ${parsed.password}\n📝 ${parsed.keterangan}`);
+
+      // Broadcast ke chat lain
+      const notifText = `🔔 *Email baru dicatat oleh ${senderName}*\n#${nextNo} | ${parsed.akun} | ${parsed.keterangan}`;
+      for (const id of activeChatIds) {
+         if (id !== chatId) {
+            bot.sendMessage(id, notifText, { parse_mode: 'Markdown' }).catch(() => {
+               activeChatIds.delete(id);
+               saveChatIds();
+            });
+         }
+      }
+   } catch (error) {
+      console.error('Error adding email:', error);
+      bot.sendMessage(chatId, '❌ Gagal mencatat email. Error: ' + error.message);
+   }
+});
+
+// /emaillist - Semua email
+bot.onText(/\/emaillist/, async (msg) => {
+   const chatId = msg.chat.id;
+
+   try {
+      const doc = await getSheet();
+      const sheet = await getOrCreateEmailSheet(doc);
+      const rows = await sheet.getRows();
+
+      if (rows.length === 0) {
+         return bot.sendMessage(chatId, '📧 Belum ada data email.');
+      }
+
+      const lines = [];
+
+      for (const row of rows) {
+         const no = row.get('No') || row._rawData[0];
+         const akun = row.get('Akun') || row._rawData[1];
+         const password = row.get('Password') || row._rawData[2];
+         const keterangan = row.get('Keterangan') || row._rawData[3];
+
+         lines.push(`#${no} ${akun} | ${password} | ${keterangan}`);
+      }
+
+      bot.sendMessage(chatId, `📧 Semua Email [${EMAIL_SHEET_NAME}]\n${lines.join('\n')}\n\nTotal: ${lines.length} email`);
+   } catch (error) {
+      console.error('Error getting emaillist:', error);
+      bot.sendMessage(chatId, '❌ Gagal mengambil data. Error: ' + error.message);
+   }
+});
+
+// /emailedit <nomor> <field> <value> - Edit email
+bot.onText(/\/emailedit\s+(\d+)\s+(\w+)\s+(.+)/, async (msg, match) => {
+   const chatId = msg.chat.id;
+   const targetNo = parseInt(match[1]);
+   const field = match[2].toLowerCase();
+   const value = match[3].trim();
+
+   try {
+      // Validate field
+      const validFields = ['akun', 'password', 'keterangan'];
+      if (!validFields.includes(field)) {
+         return bot.sendMessage(chatId, `❌ Field tidak valid. Gunakan: akun, password, atau keterangan\n\nContoh:\n/emailedit 1 akun newemail@gmail.com\n/emailedit 1 password newpass123\n/emailedit 1 keterangan Email kerja`);
+      }
+
+      const doc = await getSheet();
+      const sheet = await getOrCreateEmailSheet(doc);
+      const rows = await sheet.getRows();
+
+      // Find target row
+      const rowToEdit = rows.find((row) => {
+         const no = parseInt(row.get('No') || row._rawData[0]);
+         return no === targetNo;
+      });
+
+      if (!rowToEdit) {
+         return bot.sendMessage(chatId, `❌ Email #${targetNo} tidak ditemukan.`);
+      }
+
+      // Save old value for confirmation
+      const fieldName = field.charAt(0).toUpperCase() + field.slice(1);
+      const oldValue = rowToEdit.get(fieldName) || rowToEdit._rawData[validFields.indexOf(field) + 1];
+
+      // Update field
+      rowToEdit.set(fieldName, value);
+      await rowToEdit.save();
+
+      bot.sendMessage(chatId, `✏️ Berhasil edit email #${targetNo}\n\nField: ${fieldName}\nDari: ${oldValue}\nJadi: ${value}`);
+   } catch (error) {
+      console.error('Error editing email:', error);
+      bot.sendMessage(chatId, '❌ Gagal mengedit email. Error: ' + error.message);
+   }
+});
+
+// /emaildelete <nomor> - Hapus email
+bot.onText(/\/emaildelete\s+(\d+)/, async (msg, match) => {
+   const chatId = msg.chat.id;
+   const targetNo = parseInt(match[1]);
+
+   try {
+      const doc = await getSheet();
+      const sheet = await getOrCreateEmailSheet(doc);
+      const rows = await sheet.getRows();
+
+      const rowToDelete = rows.find((row) => {
+         const no = parseInt(row.get('No') || row._rawData[0]);
+         return no === targetNo;
+      });
+
+      if (!rowToDelete) {
+         return bot.sendMessage(chatId, `❌ Email #${targetNo} tidak ditemukan.`);
+      }
+
+      const deletedAkun = rowToDelete.get('Akun') || rowToDelete._rawData[1];
+      const deletedKet = rowToDelete.get('Keterangan') || rowToDelete._rawData[3];
+
+      await rowToDelete.delete();
+
+      // Renumber remaining rows
+      const remainingRows = await sheet.getRows();
+      for (let i = 0; i < remainingRows.length; i++) {
+         remainingRows[i].set('No', i + 1);
+         await remainingRows[i].save();
+      }
+
+      bot.sendMessage(chatId, `🗑️ Email #${targetNo} dihapus\n${deletedAkun} | ${deletedKet}\n\nSisa ${remainingRows.length} email (sudah di-renumber)`);
+   } catch (error) {
+      console.error('Error deleting email:', error);
+      bot.sendMessage(chatId, '❌ Gagal menghapus email. Error: ' + error.message);
    }
 });
 
