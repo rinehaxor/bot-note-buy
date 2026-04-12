@@ -15,10 +15,11 @@
    "author": "",
    "license": "MIT",
    "dependencies": {
-      "node-telegram-bot-api": "^0.66.0",
-      "google-spreadsheet": "^4.1.4",
+      "axios": "^1.15.0",
+      "dotenv": "^16.4.5",
       "google-auth-library": "^9.15.0",
-      "dotenv": "^16.4.5"
+      "google-spreadsheet": "^4.1.4",
+      "node-telegram-bot-api": "^0.66.0"
    },
    "engines": {
       "node": ">=18.0.0"
