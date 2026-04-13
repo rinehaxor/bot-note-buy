@@ -6,6 +6,7 @@ const axios = require('axios');
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:8000/api/v1';
 const API_KEY = process.env.API_KEY;
+const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => id.trim()) : [];
 
 if (!TELEGRAM_BOT_TOKEN) {
    console.error('❌ TELEGRAM_BOT_TOKEN tidak ditemukan di .env');
@@ -56,6 +57,35 @@ const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 console.log('🤖 Bot started successfully!');
 console.log(`🔗 API: ${API_BASE_URL}`);
 
+// ===== MIDDLEWARE / GLOBAL HANDLER =====
+bot.on('message', (msg) => {
+   // Abaikan jika bot menerima callback_query atau sistem lain yang bukan text/media
+   if (!msg.chat) return;
+   
+   const chatId = msg.chat.id.toString();
+   const senderName = msg.from.username ? `@${msg.from.username}` : (msg.from.first_name || 'Seseorang');
+
+   // Jika ADMIN_IDS diset, dan yang chat bukan admin, kirim notif ke semua admin
+   if (ADMIN_IDS.length > 0 && !ADMIN_IDS.includes(chatId)) {
+      for (const adminId of ADMIN_IDS) {
+         bot.sendMessage(
+            adminId,
+            `⚠️ *Aktivitas Tidak Dikenal*\n\nUser: ${senderName}\nID Chat: \`${chatId}\`\nPesan: ${msg.text || '[Bukan Teks]'}`,
+            { parse_mode: 'Markdown' }
+         ).catch(err => console.error("Gagal kirim notif ke admin:", err.message));
+      }
+   }
+});
+
+// Wrapper untuk mengecek apakah user memiliki akses (opsional, jika ingin blokir)
+function checkAccess(msg) {
+   if (ADMIN_IDS.length > 0 && !ADMIN_IDS.includes(msg.chat.id.toString())) {
+      bot.sendMessage(msg.chat.id, '⛔ Maaf, Anda tidak memiliki akses untuk menggunakan bot ini.');
+      return false;
+   }
+   return true;
+}
+
 // ===== HELPERS =====
 function parseIDR(s) {
    const cleaned = String(s).replace(/\s/g, '').replace(/rp/gi, '').replace(/\./g, '').replace(/,/g, '.');
@@ -66,6 +96,7 @@ function parseIDR(s) {
 
 // /start & /help
 bot.onText(/\/(start|help)/, (msg) => {
+   if (!checkAccess(msg)) return;
    const chatId = msg.chat.id;
    const helpText = `📋 *Daftar Perintah Bot*
 
@@ -110,6 +141,7 @@ bot.onText(/\/(start|help)/, (msg) => {
 
 // /add Aplikasi | Jenis | Laba
 bot.onText(/\/add (.+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
    const chatId = msg.chat.id;
    const text = msg.text;
    const raw = text.slice(4).trim();
@@ -138,46 +170,55 @@ bot.onText(/\/add (.+)/, async (msg, match) => {
 
 // /today
 bot.onText(/\/today/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/incomes/today');
 });
 
 // /yesterday
 bot.onText(/\/yesterday/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/incomes/yesterday');
 });
 
 // /week
 bot.onText(/\/week/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/incomes/week');
 });
 
 // /month
 bot.onText(/\/month/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/incomes/month');
 });
 
 // /list
 bot.onText(/\/list/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/incomes');
 });
 
 // /summary
 bot.onText(/\/summary/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/incomes/summary');
 });
 
 // /top
 bot.onText(/\/top/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/incomes/top');
 });
 
 // /stats
 bot.onText(/\/stats/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/incomes/stats');
 });
 
 // /edit <nomor> <field> <value>
 bot.onText(/\/edit\s+(\d+)\s+(\w+)\s+(.+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
    const chatId = msg.chat.id;
    const id = match[1];
    const field = match[2].toLowerCase();
@@ -196,11 +237,13 @@ bot.onText(/\/edit\s+(\d+)\s+(\w+)\s+(.+)/, async (msg, match) => {
 
 // /undo
 bot.onText(/\/undo/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'delete', '/incomes/last');
 });
 
 // /delete <nomor>
 bot.onText(/\/delete\s+(\d+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'delete', `/incomes/${match[1]}`);
 });
 
@@ -208,6 +251,7 @@ bot.onText(/\/delete\s+(\d+)/, async (msg, match) => {
 
 // /spend Kategori | Keterangan | Nominal
 bot.onText(/\/spend (.+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
    const chatId = msg.chat.id;
    const text = msg.text;
    const raw = text.slice(6).trim();
@@ -240,21 +284,25 @@ bot.onText(/\/spend (.+)/, async (msg, match) => {
 
 // /spendlist
 bot.onText(/\/spendlist/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/expenses');
 });
 
 // /spendtoday
 bot.onText(/\/spendtoday/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/expenses/today');
 });
 
 // /spendmonth
 bot.onText(/\/spendmonth/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/expenses/month');
 });
 
 // /spenddelete <nomor>
 bot.onText(/\/spenddelete\s+(\d+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'delete', `/expenses/${match[1]}`);
 });
 
@@ -262,6 +310,7 @@ bot.onText(/\/spenddelete\s+(\d+)/, async (msg, match) => {
 
 // /email Akun | Password | Keterangan
 bot.onText(/\/email\s+(.+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
    const chatId = msg.chat.id;
    const text = msg.text;
    const raw = text.slice(6).trim();
@@ -286,11 +335,13 @@ bot.onText(/\/email\s+(.+)/, async (msg, match) => {
 
 // /emaillist
 bot.onText(/\/emaillist/, async (msg) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'get', '/emails');
 });
 
 // /emailedit <nomor> <field> <value>
 bot.onText(/\/emailedit\s+(\d+)\s+(\w+)\s+(.+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
    const chatId = msg.chat.id;
    const id = match[1];
    const field = match[2].toLowerCase();
@@ -309,7 +360,13 @@ bot.onText(/\/emailedit\s+(\d+)\s+(\w+)\s+(.+)/, async (msg, match) => {
 
 // /emaildelete <nomor>
 bot.onText(/\/emaildelete\s+(\d+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
    await callApi(msg.chat.id, 'delete', `/emails/${match[1]}`);
+});
+
+// /myid (Untuk mengecek ID Telegram sendiri agar bisa dimasukkan ke .env)
+bot.onText(/\/myid/, (msg) => {
+   bot.sendMessage(msg.chat.id, `🆔 ID Telegram Anda adalah: \`${msg.chat.id}\`\n\nSilakan masukkan ID ini ke \`ADMIN_IDS\` di dalam file \`.env\` (pisahkan dengan koma jika lebih dari satu admin, contoh: \`ADMIN_IDS=123,456\`) untuk memblokir orang tidak dikenal dan menerima notifikasi.`, { parse_mode: 'Markdown' });
 });
 
 // ===== ERROR HANDLING =====
