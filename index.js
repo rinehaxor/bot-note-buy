@@ -52,6 +52,19 @@ async function callApi(chatId, method, url, data = null) {
    }
 }
 
+// Helper: kirim notifikasi ke SEMUA admin LAIN (bukan yang melakukan aksi)
+async function notifyOtherAdmins(senderChatId, notifMessage) {
+   const senderId = senderChatId.toString();
+   for (const adminId of ADMIN_IDS) {
+      if (adminId === senderId) continue; // skip admin yang melakukan aksi
+      bot.sendMessage(
+         adminId,
+         notifMessage,
+         { parse_mode: 'Markdown' }
+      ).catch(err => console.error(`Gagal kirim notif ke admin ${adminId}:`, err.message));
+   }
+}
+
 // ===== INIT BOT =====
 const bot = new TelegramBot(TELEGRAM_BOT_TOKEN, { polling: true });
 console.log('🤖 Bot started successfully!');
@@ -90,6 +103,14 @@ function checkAccess(msg) {
 function parseIDR(s) {
    const cleaned = String(s).replace(/\s/g, '').replace(/rp/gi, '').replace(/\./g, '').replace(/,/g, '.');
    return Math.round(Number(cleaned));
+}
+
+function formatIDR(num) {
+   return new Intl.NumberFormat('id-ID').format(num);
+}
+
+function getSenderName(msg) {
+   return msg.from.first_name || msg.from.username || 'Seseorang';
 }
 
 // ===== BOT COMMANDS =====
@@ -159,13 +180,52 @@ bot.onText(/\/add (.+)/, async (msg, match) => {
       return bot.sendMessage(chatId, 'Format salah.\nPakai:\n/add Aplikasi | Jenis | Laba\nContoh: /add Canva | lifetime | 15000');
    }
 
-   const senderName = msg.from.first_name || msg.from.username || 'Seseorang';
-   await callApi(chatId, 'post', '/incomes', {
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'post', '/incomes', {
       aplikasi,
       jenis,
       laba,
       source_user: senderName,
    });
+
+   if (result) {
+      // Ambil total transaksi bulan ini
+      let monthCount = '?';
+      let monthTotal = 0;
+      try {
+         const monthRes = await api.get('/incomes/month');
+         const monthData = monthRes.data;
+         // Coba ambil count dari berbagai format response API
+         if (monthData.count !== undefined) {
+            monthCount = monthData.count;
+         } else if (monthData.data && Array.isArray(monthData.data)) {
+            monthCount = monthData.data.length;
+         } else if (Array.isArray(monthData)) {
+            monthCount = monthData.length;
+         }
+         // Coba hitung total laba bulan ini
+         if (monthData.total !== undefined) {
+            monthTotal = monthData.total;
+         } else if (monthData.data && Array.isArray(monthData.data)) {
+            monthTotal = monthData.data.reduce((sum, item) => sum + (Number(item.laba) || 0), 0);
+         } else if (Array.isArray(monthData)) {
+            monthTotal = monthData.reduce((sum, item) => sum + (Number(item.laba) || 0), 0);
+         }
+      } catch (err) {
+         console.error('Gagal ambil data bulan ini:', err.message);
+      }
+
+      const bulanIni = new Date().toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
+
+      await bot.sendMessage(chatId,
+         `📊 *Total Transaksi ${bulanIni}:* ${monthCount} transaksi\n💰 *Total Laba:* Rp ${formatIDR(monthTotal)}`,
+         { parse_mode: 'Markdown' }
+      );
+
+      await notifyOtherAdmins(chatId,
+         `📥 *Pemasukan Baru* oleh ${senderName}\n\n📱 Aplikasi: *${aplikasi}*\n📦 Jenis: ${jenis}\n💰 Laba: Rp ${formatIDR(laba)}\n\n📊 Total Transaksi ${bulanIni}: *${monthCount} transaksi*\n💰 Total Laba: Rp ${formatIDR(monthTotal)}`
+      );
+   }
 });
 
 // /today
@@ -232,19 +292,42 @@ bot.onText(/\/edit\s+(\d+)\s+(\w+)\s+(.+)/, async (msg, match) => {
    const data = {};
    data[field] = field === 'laba' ? parseIDR(value) : value;
 
-   await callApi(chatId, 'put', `/incomes/${id}`, data);
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'put', `/incomes/${id}`, data);
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `✏️ *Edit Pemasukan #${id}* oleh ${senderName}\n\n📝 ${field}: *${value}*`
+      );
+   }
 });
 
 // /undo
 bot.onText(/\/undo/, async (msg) => {
    if (!checkAccess(msg)) return;
-   await callApi(msg.chat.id, 'delete', '/incomes/last');
+   const chatId = msg.chat.id;
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'delete', '/incomes/last');
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `↩️ *Undo Pemasukan Terakhir* oleh ${senderName}`
+      );
+   }
 });
 
 // /delete <nomor>
 bot.onText(/\/delete\s+(\d+)/, async (msg, match) => {
    if (!checkAccess(msg)) return;
-   await callApi(msg.chat.id, 'delete', `/incomes/${match[1]}`);
+   const chatId = msg.chat.id;
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'delete', `/incomes/${match[1]}`);
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `🗑️ *Hapus Pemasukan #${match[1]}* oleh ${senderName}`
+      );
+   }
 });
 
 // ===== PENGELUARAN =====
@@ -273,13 +356,19 @@ bot.onText(/\/spend (.+)/, async (msg, match) => {
       return bot.sendMessage(chatId, '❌ Format salah. Nominal harus angka positif.');
    }
 
-   const senderName = msg.from.first_name || msg.from.username || 'Seseorang';
-   await callApi(chatId, 'post', '/expenses', {
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'post', '/expenses', {
       kategori,
       keterangan,
       nominal,
       source_user: senderName,
    });
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `💸 *Pengeluaran Baru* oleh ${senderName}\n\n📂 Kategori: *${kategori}*\n📝 Keterangan: ${keterangan}\n💵 Nominal: Rp ${formatIDR(nominal)}`
+      );
+   }
 });
 
 // /spendlist
@@ -303,7 +392,15 @@ bot.onText(/\/spendmonth/, async (msg) => {
 // /spenddelete <nomor>
 bot.onText(/\/spenddelete\s+(\d+)/, async (msg, match) => {
    if (!checkAccess(msg)) return;
-   await callApi(msg.chat.id, 'delete', `/expenses/${match[1]}`);
+   const chatId = msg.chat.id;
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'delete', `/expenses/${match[1]}`);
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `🗑️ *Hapus Pengeluaran #${match[1]}* oleh ${senderName}`
+      );
+   }
 });
 
 // ===== EMAIL =====
@@ -324,13 +421,19 @@ bot.onText(/\/email\s+(.+)/, async (msg, match) => {
       );
    }
 
-   const senderName = msg.from.first_name || msg.from.username || 'Seseorang';
-   await callApi(chatId, 'post', '/emails', {
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'post', '/emails', {
       akun: parts[0],
       password: parts[1],
       keterangan: parts[2],
       source_user: senderName,
    });
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `📧 *Email Baru Ditambahkan* oleh ${senderName}\n\n📬 Akun: *${parts[0]}*\n📝 Keterangan: ${parts[2]}`
+      );
+   }
 });
 
 // /emaillist
@@ -355,13 +458,28 @@ bot.onText(/\/emailedit\s+(\d+)\s+(\w+)\s+(.+)/, async (msg, match) => {
    const data = {};
    data[field] = value;
 
-   await callApi(chatId, 'put', `/emails/${id}`, data);
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'put', `/emails/${id}`, data);
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `✏️ *Edit Email #${id}* oleh ${senderName}\n\n📝 ${field}: *${value}*`
+      );
+   }
 });
 
 // /emaildelete <nomor>
 bot.onText(/\/emaildelete\s+(\d+)/, async (msg, match) => {
    if (!checkAccess(msg)) return;
-   await callApi(msg.chat.id, 'delete', `/emails/${match[1]}`);
+   const chatId = msg.chat.id;
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'delete', `/emails/${match[1]}`);
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `🗑️ *Hapus Email #${match[1]}* oleh ${senderName}`
+      );
+   }
 });
 
 // /myid (Untuk mengecek ID Telegram sendiri agar bisa dimasukkan ke .env)
