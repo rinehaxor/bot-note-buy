@@ -148,6 +148,12 @@ bot.onText(/\/(start|help)/, (msg) => {
 /emailedit <nomor> <field> <value>
 /emaildelete <nomor>
 
+✖️ *X ACCOUNT*
+/x Nama | Username | Email | Status | Link
+/xlist - Semua X tercatat
+/xedit <nomor> <field> <value>
+/xdelete <nomor>
+
 /help - Tampilkan bantuan ini
 
 *Contoh:*
@@ -478,6 +484,87 @@ bot.onText(/\/emaildelete\s+(\d+)/, async (msg, match) => {
    if (result) {
       await notifyOtherAdmins(chatId,
          `🗑️ *Hapus Email #${match[1]}* oleh ${senderName}`
+      );
+   }
+});
+
+// ===== X ACCOUNT =====
+
+// /x Nama | Username | Email | Status | Link
+bot.onText(/\/x\s+(.+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
+   const chatId = msg.chat.id;
+   const text = msg.text;
+   const raw = text.slice(3).trim();
+   const parts = raw.split('|').map((s) => s.trim()).filter(Boolean);
+
+   if (parts.length < 5) {
+      return bot.sendMessage(
+         chatId,
+         '❌ Format salah.\nPakai:\n/x Nama | Username | Email | Status | Link\n\n*Contoh:*\n/x Akun Pribadi | @johndoe | john@gmail.com | Aktif | https://x.com/johndoe',
+         { parse_mode: 'Markdown' },
+      );
+   }
+
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'post', '/x-accounts', {
+      nama: parts[0],
+      username: parts[1],
+      email: parts[2],
+      status: parts[3],
+      link: parts[4],
+      source_user: senderName,
+   });
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `✖️ *X Account Baru Ditambahkan* oleh ${senderName}\n\n👤 Nama: *${parts[0]}*\n🔗 Username: ${parts[1]}`
+      );
+   }
+});
+
+// /xlist
+bot.onText(/\/xlist/, async (msg) => {
+   if (!checkAccess(msg)) return;
+   await callApi(msg.chat.id, 'get', '/x-accounts');
+});
+
+// /xedit <nomor> <field> <value>
+bot.onText(/\/xedit\s+(\d+)\s+(\w+)\s+(.+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
+   const chatId = msg.chat.id;
+   const id = match[1];
+   const field = match[2].toLowerCase();
+   const value = match[3].trim();
+
+   const validFields = ['nama', 'username', 'email', 'status', 'link'];
+   if (!validFields.includes(field)) {
+      return bot.sendMessage(chatId, `❌ Field tidak valid. Gunakan: nama, username, email, status, atau link`);
+   }
+
+   const data = {};
+   data[field] = value;
+
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'put', `/x-accounts/${id}`, data);
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `✏️ *Edit X Account #${id}* oleh ${senderName}\n\n📝 ${field}: *${value}*`
+      );
+   }
+});
+
+// /xdelete <nomor>
+bot.onText(/\/xdelete\s+(\d+)/, async (msg, match) => {
+   if (!checkAccess(msg)) return;
+   const chatId = msg.chat.id;
+   const senderName = getSenderName(msg);
+   const result = await callApi(chatId, 'delete', `/x-accounts/${match[1]}`);
+
+   if (result) {
+      await notifyOtherAdmins(chatId,
+         `🗑️ *Hapus X Account #${match[1]}* oleh ${senderName}`
       );
    }
 });
