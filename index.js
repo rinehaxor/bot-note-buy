@@ -618,15 +618,60 @@ function extractNumber(jid) {
    return jid.replace(/@s\.whatsapp\.net|@c\.us|@lid/g, '');
 }
 
-// Helper: cek apakah JID adalah admin
-function isWAAdmin(jid) {
+// Cache: normalized LID → true/false (isi secara lazy)
+const lidCache = {};
+
+// Helper: cek apakah JID adalah admin (async — support lazy resolve @lid)
+async function isWAAdminAsync(sock, jid) {
    if (WA_ADMIN_NUMBERS.length === 0) return true;
    const normalized = normalizeJID(jid);
-   // Cek di resolved JID set (termasuk LID yang sudah di-map)
+
+   // 1. Cek di resolved JID set (fast path)
    if (adminJIDSet.has(jid) || adminJIDSet.has(normalized)) return true;
-   // Fallback: cek berdasarkan nomor bersih (hanya berlaku untuk @s.whatsapp.net)
+
+   // 2. Fallback: cek berdasarkan nomor bersih (@s.whatsapp.net)
    const numClean = extractNumber(normalized).replace(/\D/g, '');
-   return WA_ADMIN_NUMBERS.some(admin => admin.replace(/\D/g, '') === numClean);
+   if (numClean && WA_ADMIN_NUMBERS.some(a => a.replace(/\D/g, '') === numClean)) return true;
+
+   // 3. Untuk @lid: cek cache dulu
+   if (lidCache[normalized] !== undefined) {
+      console.log(`[WA] LID cache hit ${normalized}: ${lidCache[normalized]}`);
+      return lidCache[normalized];
+   }
+
+   // 4. Untuk @lid: resolve via sock.onWhatsApp (lazy, di-cache)
+   if (normalized.endsWith('@lid')) {
+      const lidNum = normalized.replace('@lid', '');
+      console.log(`[WA] Resolving LID ${lidNum} via onWhatsApp...`);
+      try {
+         const results = await sock.onWhatsApp(lidNum);
+         if (results && results.length > 0 && results[0].jid) {
+            const phoneJID = results[0].jid;
+            const phoneNum = phoneJID.replace(/@[^@]+$/, '').replace(/\D/g, '');
+            const matchedAdmin = WA_ADMIN_NUMBERS.find(a => a.replace(/\D/g, '') === phoneNum);
+            if (matchedAdmin) {
+               // Admin terkonfirmasi — simpan ke set agar next request lebih cepat
+               adminJIDSet.add(jid);
+               adminJIDSet.add(normalized);
+               jidToAdminNum[jid] = matchedAdmin;
+               jidToAdminNum[normalized] = matchedAdmin;
+               lidCache[normalized] = true;
+               console.log(`[WA] ✅ LID ${normalized} → admin ${matchedAdmin}`);
+               return true;
+            } else {
+               lidCache[normalized] = false;
+               console.log(`[WA] LID ${normalized} → phone ${phoneNum} bukan admin`);
+               return false;
+            }
+         }
+      } catch (err) {
+         console.log(`[WA] onWhatsApp LID lookup failed (${normalized}):`, err.message);
+      }
+      // Fallback gagal — blokir tapi jangan cache (bisa retry next message)
+      return false;
+   }
+
+   return false;
 }
 
 // Helper: kirim pesan WA
@@ -705,8 +750,8 @@ async function handleWAMessage(sock, message) {
       const senderNumber = senderJID.replace('@s.whatsapp.net', '');
       const senderName = msg.pushName || senderNumber;
 
-      // Cek akses
-      if (WA_ADMIN_NUMBERS.length > 0 && !isWAAdmin(senderJID)) {
+      // Cek akses (async — support LID resolve)
+      if (WA_ADMIN_NUMBERS.length > 0 && !(await isWAAdminAsync(sock, senderJID))) {
          for (const adminNum of WA_ADMIN_NUMBERS) {
             await sendWA(toJID(adminNum),
                `⚠️ Aktivitas Tidak Dikenal\n\nUser: ${senderName}\nNomor: ${senderNumber}\nPesan: ${text}`
