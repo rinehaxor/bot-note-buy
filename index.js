@@ -606,10 +606,15 @@ async function buildAdminJIDSet(sock) {
    console.log('[WA] Admin JIDs:', [...adminJIDSet]);
 }
 
+// Helper: ekstrak nomor bersih dari JID (strip @s.whatsapp.net / @c.us / @lid)
+function extractNumber(jid) {
+   return jid.replace(/@s\.whatsapp\.net|@c\.us|@lid/g, '');
+}
+
 // Helper: cek apakah JID adalah admin
 function isWAAdmin(jid) {
    if (WA_ADMIN_NUMBERS.length === 0) return true;
-   // Cek di resolved JID set
+   // Cek di resolved JID set (hasil sock.onWhatsApp)
    if (adminJIDSet.has(jid)) return true;
    // Fallback: cek berdasarkan nomor bersih (untuk @s.whatsapp.net)
    const numClean = extractNumber(jid).replace(/\D/g, '');
