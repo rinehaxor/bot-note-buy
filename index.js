@@ -1,7 +1,7 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeInMemoryStore } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const { Boom } = require('@hapi/boom');
 const path = require('path');
@@ -563,6 +563,9 @@ bot.on('polling_error', (error) => {
 
 let waSocket = null;
 
+// In-memory store Baileys — track contacts & LID mappings secara otomatis
+const waStore = makeInMemoryStore({});
+
 // Helper: parse nomor WA jadi JID
 function toJID(number) {
    const clean = number.replace(/\D/g, '');
@@ -621,53 +624,61 @@ function extractNumber(jid) {
 // Cache: normalized LID → true/false (isi secara lazy)
 const lidCache = {};
 
+// Helper: scan store contacts untuk cari admin LID
+function syncAdminLIDsFromStore() {
+   if (!waStore.contacts) return;
+   for (const [contactJID, contact] of Object.entries(waStore.contacts)) {
+      // Cari kontak yang punya @s.whatsapp.net dan ada adminnya
+      const phoneNum = contactJID.replace(/@[^@]+$/, '').replace(/\D/g, '');
+      const matchedAdmin = WA_ADMIN_NUMBERS.find(a => a.replace(/\D/g, '') === phoneNum);
+      if (!matchedAdmin) continue;
+
+      // Tambahkan phone JID ke set (jika belum)
+      adminJIDSet.add(contactJID);
+      jidToAdminNum[contactJID] = matchedAdmin;
+
+      // Jika ada LID di contact, tambahkan juga
+      if (contact.lid) {
+         const normalizedLid = normalizeJID(contact.lid);
+         adminJIDSet.add(contact.lid);
+         adminJIDSet.add(normalizedLid);
+         jidToAdminNum[contact.lid] = matchedAdmin;
+         jidToAdminNum[normalizedLid] = matchedAdmin;
+         lidCache[normalizedLid] = true;
+         console.log(`[WA] 📍 Admin LID dari store: ${matchedAdmin} → ${contact.lid}`);
+      }
+   }
+}
+
 // Helper: cek apakah JID adalah admin (async — support lazy resolve @lid)
 async function isWAAdminAsync(sock, jid) {
    if (WA_ADMIN_NUMBERS.length === 0) return true;
    const normalized = normalizeJID(jid);
 
-   // 1. Cek di resolved JID set (fast path)
+   // 1. Fast path: cek di resolved JID set
    if (adminJIDSet.has(jid) || adminJIDSet.has(normalized)) return true;
 
    // 2. Fallback: cek berdasarkan nomor bersih (@s.whatsapp.net)
    const numClean = extractNumber(normalized).replace(/\D/g, '');
-   if (numClean && WA_ADMIN_NUMBERS.some(a => a.replace(/\D/g, '') === numClean)) return true;
-
-   // 3. Untuk @lid: cek cache dulu
-   if (lidCache[normalized] !== undefined) {
-      console.log(`[WA] LID cache hit ${normalized}: ${lidCache[normalized]}`);
-      return lidCache[normalized];
+   if (numClean && WA_ADMIN_NUMBERS.some(a => a.replace(/\D/g, '') === numClean)) {
+      // Tambahkan ke set untuk request berikutnya
+      adminJIDSet.add(jid);
+      adminJIDSet.add(normalized);
+      return true;
    }
 
-   // 4. Untuk @lid: resolve via sock.onWhatsApp (lazy, di-cache)
+   // 3. Untuk @lid: cek cache
+   if (lidCache[normalized] !== undefined) return lidCache[normalized];
+
+   // 4. Untuk @lid: scan store contacts (makeInMemoryStore)
    if (normalized.endsWith('@lid')) {
-      const lidNum = normalized.replace('@lid', '');
-      console.log(`[WA] Resolving LID ${lidNum} via onWhatsApp...`);
-      try {
-         const results = await sock.onWhatsApp(lidNum);
-         if (results && results.length > 0 && results[0].jid) {
-            const phoneJID = results[0].jid;
-            const phoneNum = phoneJID.replace(/@[^@]+$/, '').replace(/\D/g, '');
-            const matchedAdmin = WA_ADMIN_NUMBERS.find(a => a.replace(/\D/g, '') === phoneNum);
-            if (matchedAdmin) {
-               // Admin terkonfirmasi — simpan ke set agar next request lebih cepat
-               adminJIDSet.add(jid);
-               adminJIDSet.add(normalized);
-               jidToAdminNum[jid] = matchedAdmin;
-               jidToAdminNum[normalized] = matchedAdmin;
-               lidCache[normalized] = true;
-               console.log(`[WA] ✅ LID ${normalized} → admin ${matchedAdmin}`);
-               return true;
-            } else {
-               lidCache[normalized] = false;
-               console.log(`[WA] LID ${normalized} → phone ${phoneNum} bukan admin`);
-               return false;
-            }
-         }
-      } catch (err) {
-         console.log(`[WA] onWhatsApp LID lookup failed (${normalized}):`, err.message);
-      }
-      // Fallback gagal — blokir tapi jangan cache (bisa retry next message)
+      console.log(`[WA] Cek @lid di store: ${normalized}`);
+      // Scan semua kontak di store, cari yang LID-nya cocok
+      syncAdminLIDsFromStore();
+      if (adminJIDSet.has(jid) || adminJIDSet.has(normalized)) return true;
+
+      // Belum ketemu, mark cache false sementara (akan di-clear saat contacts update)
+      console.log(`[WA] ⚠️ LID ${normalized} belum ada di store, minta admin kirim /mynumber`);
       return false;
    }
 
@@ -994,6 +1005,9 @@ Contoh:
    }
 }
 
+// Global Store
+const waStore = makeInMemoryStore({});
+
 // ===== INIT WHATSAPP BOT =====
 async function startWABot() {
    // Pastikan folder session ada
@@ -1009,12 +1023,13 @@ async function startWABot() {
    const sock = makeWASocket({
       version,
       auth: state,
-      printQRInTerminal: false, // kita handle sendiri
+      printQRInTerminal: false,
       logger: { level: 'silent', trace: () => {}, debug: () => {}, info: () => {}, warn: (m) => console.warn('[WA]', m), error: (m) => console.error('[WA]', m), fatal: (m) => console.error('[WA FATAL]', m), child: () => ({ level: 'silent', trace: () => {}, debug: () => {}, info: () => {}, warn: () => {}, error: () => {}, fatal: () => {}, child: () => {} }) },
       browser: ['Bot Note Buy', 'Chrome', '1.0.0'],
    });
 
    waSocket = sock;
+   waStore.bind(sock.ev);
 
    // Event: QR Code
    sock.ev.on('connection.update', async (update) => {
@@ -1055,27 +1070,9 @@ async function startWABot() {
    // Event: Simpan credentials
    sock.ev.on('creds.update', saveCreds);
 
-   // Event: Contacts update — tangkap LID admin dari kontak yang dikenal WA
-   sock.ev.on('contacts.upsert', (contacts) => {
-      for (const contact of contacts) {
-         const contactJID = contact.id || '';
-         // Cek apakah ini kontak admin (berdasarkan nomor @s.whatsapp.net)
-         if (!contactJID.endsWith('@s.whatsapp.net') && !contactJID.endsWith('@c.us')) continue;
-         const contactNum = contactJID.replace(/@s\.whatsapp\.net|@c\.us/g, '').replace(/\D/g, '');
-         const matchedAdmin = WA_ADMIN_NUMBERS.find(n => n.replace(/\D/g, '') === contactNum);
-         if (!matchedAdmin) continue;
-
-         // Jika kontak ini punya LID, tambahkan ke adminJIDSet
-         if (contact.lid) {
-            const normalizedLid = normalizeJID(contact.lid);
-            adminJIDSet.add(contact.lid);
-            adminJIDSet.add(normalizedLid);
-            jidToAdminNum[contact.lid] = matchedAdmin;
-            jidToAdminNum[normalizedLid] = matchedAdmin;
-            console.log(`[WA] Admin LID dari contacts: ${matchedAdmin} → ${contact.lid}`);
-         }
-      }
-   });
+   // Event: Contacts update — scan ulang LID admin saat contacts di-update
+   sock.ev.on('contacts.upsert', () => syncAdminLIDsFromStore());
+   sock.ev.on('contacts.update', () => syncAdminLIDsFromStore());
 
    // Event: Pesan masuk
    sock.ev.on('messages.upsert', (message) => handleWAMessage(sock, message));
