@@ -708,11 +708,27 @@ async function callApiWA(jid, method, url, data = null) {
    }
 }
 
+// Set cache pesan yang sudah diproses (mencegah double trigger dari Baileys)
+const processedMsgKeys = new Set();
+
 // ===== HANDLER PESAN WA =====
 async function handleWAMessage(sock, message) {
+   if (message.type && message.type !== 'notify') return;
+
    try {
       const msg = message.messages?.[0];
       if (!msg || msg.key.fromMe) return;
+
+      // Deduplikasi ID pesan
+      const msgId = msg.key.id;
+      if (msgId) {
+         if (processedMsgKeys.has(msgId)) return;
+         processedMsgKeys.add(msgId);
+         if (processedMsgKeys.size > 500) {
+            const first = processedMsgKeys.values().next().value;
+            processedMsgKeys.delete(first);
+         }
+      }
 
       const jid = msg.key.remoteJid;
       if (!jid || jid.endsWith('@g.us')) return; // abaikan pesan grup
