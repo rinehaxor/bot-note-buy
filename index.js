@@ -569,28 +569,51 @@ function toJID(number) {
    return `${clean}@s.whatsapp.net`;
 }
 
-// Helper: cek apakah nomor WA adalah admin
+// Helper: ekstrak nomor bersih dari JID (handle @s.whatsapp.net, @c.us, @lid)
+function extractNumber(jid) {
+   return jid.replace(/@s\.whatsapp\.net|@c\.us|@lid/g, '');
+}
+
+// Helper: cek apakah JID adalah admin
+// Mendukung format @s.whatsapp.net, @c.us, maupun @lid (WhatsApp multi-device)
 function isWAAdmin(jid) {
-   if (WA_ADMIN_NUMBERS.length === 0) return true; // kalau tidak diset, semua bisa akses
-   const number = jid.replace('@s.whatsapp.net', '').replace('@c.us', '');
-   return WA_ADMIN_NUMBERS.includes(number);
+   if (WA_ADMIN_NUMBERS.length === 0) return true;
+   const number = extractNumber(jid);
+   // Cek langsung dan cek dengan format 62 vs 0
+   return WA_ADMIN_NUMBERS.some(admin => {
+      const adminClean = admin.replace(/\D/g, '');
+      const numClean = number.replace(/\D/g, '');
+      return adminClean === numClean;
+   });
 }
 
 // Helper: kirim pesan WA
 async function sendWA(jid, text) {
-   if (!waSocket) return;
+   if (!waSocket) {
+      console.warn('[WA] sendWA dipanggil tapi waSocket belum siap');
+      return;
+   }
    try {
       await waSocket.sendMessage(jid, { text });
+      console.log(`[WA] ✅ Pesan terkirim ke ${jid}`);
    } catch (err) {
-      console.error(`[WA] Gagal kirim pesan ke ${jid}:`, err.message);
+      console.error(`[WA] ❌ Gagal kirim pesan ke ${jid}:`, err.message);
    }
 }
 
 // Helper: notifikasi ke semua WA admin lain
+// Bandingkan nomor bersih, bukan full JID (karena sender bisa @lid, admin list pakai angka)
 async function notifyOtherWAAdmins(senderJID, notifMessage) {
+   const senderNum = extractNumber(senderJID).replace(/\D/g, '');
+   console.log(`[WA] Notif dari ${senderNum} ke admin lain (total admin: ${WA_ADMIN_NUMBERS.length})`);
    for (const adminNum of WA_ADMIN_NUMBERS) {
+      const adminClean = adminNum.replace(/\D/g, '');
+      if (adminClean === senderNum) {
+         console.log(`[WA] Skip notif ke sender sendiri (${adminClean})`);
+         continue;
+      }
       const adminJID = toJID(adminNum);
-      if (adminJID === senderJID) continue;
+      console.log(`[WA] Mengirim notif ke admin ${adminClean}...`);
       await sendWA(adminJID, notifMessage);
    }
 }
