@@ -1,7 +1,7 @@
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
-const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion, makeInMemoryStore } = require('@whiskeysockets/baileys');
+const { default: makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion } = require('@whiskeysockets/baileys');
 const qrcode = require('qrcode-terminal');
 const { Boom } = require('@hapi/boom');
 const path = require('path');
@@ -13,10 +13,16 @@ const API_BASE_URL = process.env.API_BASE_URL || 'http://localhost:8000/api/v1';
 const API_KEY = process.env.API_KEY;
 const ADMIN_IDS = process.env.ADMIN_IDS ? process.env.ADMIN_IDS.split(',').map(id => id.trim()) : [];
 
-// WA Admin Numbers — format: 628xxxxxxxxxx (tanpa +, tanpa spasi)
+// WA Admin Numbers / LIDs — format: 628xxxxxxxxxx atau 133994389749823@lid
 const WA_ADMIN_NUMBERS = process.env.WA_ADMIN_NUMBERS
    ? process.env.WA_ADMIN_NUMBERS.split(',').map(n => n.trim())
    : [];
+
+const WA_ADMIN_LIDS = process.env.WA_ADMIN_LIDS
+   ? process.env.WA_ADMIN_LIDS.split(',').map(n => n.trim())
+   : [];
+
+const ALL_WA_ADMINS = [...WA_ADMIN_NUMBERS, ...WA_ADMIN_LIDS];
 
 const WA_SESSION_DIR = path.join(__dirname, 'wa_session');
 
@@ -563,9 +569,6 @@ bot.on('polling_error', (error) => {
 
 let waSocket = null;
 
-// In-memory store Baileys — track contacts & LID mappings secara otomatis
-const waStore = makeInMemoryStore({});
-
 // Helper: parse nomor WA jadi JID
 function toJID(number) {
    const clean = number.replace(/\D/g, '');
@@ -579,10 +582,13 @@ function normalizeJID(jid) {
    return jid.replace(/(:\d+)(@)/, '$2');
 }
 
+// Helper: ekstrak nomor/digit bersih dari JID
+function extractNumber(jid) {
+   return jid.replace(/@s\.whatsapp\.net|@c\.us|@lid/g, '');
+}
+
 // Set JID admin yang sudah di-resolve (isi saat bot connect)
-// Ini untuk handle @lid format di WhatsApp multi-device
 const adminJIDSet = new Set();
-// Map: resolved JID → nomor asli (untuk skip sender)
 const jidToAdminNum = {};
 
 // Resolve semua nomor admin ke JID yang sesungguhnya via sock.onWhatsApp()
@@ -590,25 +596,27 @@ async function buildAdminJIDSet(sock) {
    if (WA_ADMIN_NUMBERS.length === 0) return;
    console.log('[WA] Resolving nomor admin ke JID...');
    for (const adminNum of WA_ADMIN_NUMBERS) {
+      if (adminNum.includes('@')) {
+         adminJIDSet.add(adminNum);
+         adminJIDSet.add(normalizeJID(adminNum));
+         continue;
+      }
       try {
          const results = await sock.onWhatsApp(adminNum);
          if (results && results.length > 0) {
             const resolvedJID = results[0].jid;
             adminJIDSet.add(resolvedJID);
-            // Juga tambahkan format @s.whatsapp.net standar sebagai fallback
             adminJIDSet.add(toJID(adminNum));
             jidToAdminNum[resolvedJID] = adminNum;
             jidToAdminNum[toJID(adminNum)] = adminNum;
             console.log(`[WA] ✅ Admin ${adminNum} → ${resolvedJID}`);
          } else {
-            // Tidak ada di WA, pakai @s.whatsapp.net saja
             adminJIDSet.add(toJID(adminNum));
             jidToAdminNum[toJID(adminNum)] = adminNum;
             console.warn(`[WA] ⚠️ Nomor ${adminNum} tidak ditemukan di WA, pakai JID standar`);
          }
       } catch (err) {
          console.error(`[WA] ❌ Gagal resolve JID untuk ${adminNum}:`, err.message);
-         // Fallback ke format standar
          adminJIDSet.add(toJID(adminNum));
          jidToAdminNum[toJID(adminNum)] = adminNum;
       }
@@ -616,73 +624,24 @@ async function buildAdminJIDSet(sock) {
    console.log('[WA] Admin JIDs:', [...adminJIDSet]);
 }
 
-// Helper: ekstrak nomor bersih dari JID (strip @s.whatsapp.net / @c.us / @lid)
-function extractNumber(jid) {
-   return jid.replace(/@s\.whatsapp\.net|@c\.us|@lid/g, '');
-}
-
-// Cache: normalized LID → true/false (isi secara lazy)
-const lidCache = {};
-
-// Helper: scan store contacts untuk cari admin LID
-function syncAdminLIDsFromStore() {
-   if (!waStore.contacts) return;
-   for (const [contactJID, contact] of Object.entries(waStore.contacts)) {
-      // Cari kontak yang punya @s.whatsapp.net dan ada adminnya
-      const phoneNum = contactJID.replace(/@[^@]+$/, '').replace(/\D/g, '');
-      const matchedAdmin = WA_ADMIN_NUMBERS.find(a => a.replace(/\D/g, '') === phoneNum);
-      if (!matchedAdmin) continue;
-
-      // Tambahkan phone JID ke set (jika belum)
-      adminJIDSet.add(contactJID);
-      jidToAdminNum[contactJID] = matchedAdmin;
-
-      // Jika ada LID di contact, tambahkan juga
-      if (contact.lid) {
-         const normalizedLid = normalizeJID(contact.lid);
-         adminJIDSet.add(contact.lid);
-         adminJIDSet.add(normalizedLid);
-         jidToAdminNum[contact.lid] = matchedAdmin;
-         jidToAdminNum[normalizedLid] = matchedAdmin;
-         lidCache[normalizedLid] = true;
-         console.log(`[WA] 📍 Admin LID dari store: ${matchedAdmin} → ${contact.lid}`);
-      }
-   }
-}
-
-// Helper: cek apakah JID adalah admin (async — support lazy resolve @lid)
-async function isWAAdminAsync(sock, jid) {
-   if (WA_ADMIN_NUMBERS.length === 0) return true;
+// Helper: cek apakah JID adalah admin
+function isWAAdmin(jid) {
+   if (ALL_WA_ADMINS.length === 0) return true;
    const normalized = normalizeJID(jid);
+   const numClean = extractNumber(normalized).replace(/\D/g, '');
 
-   // 1. Fast path: cek di resolved JID set
+   // 1. Cek di adminJIDSet
    if (adminJIDSet.has(jid) || adminJIDSet.has(normalized)) return true;
 
-   // 2. Fallback: cek berdasarkan nomor bersih (@s.whatsapp.net)
-   const numClean = extractNumber(normalized).replace(/\D/g, '');
-   if (numClean && WA_ADMIN_NUMBERS.some(a => a.replace(/\D/g, '') === numClean)) {
-      // Tambahkan ke set untuk request berikutnya
-      adminJIDSet.add(jid);
-      adminJIDSet.add(normalized);
-      return true;
-   }
+   // 2. Cek terhadap ALL_WA_ADMINS
+   return ALL_WA_ADMINS.some(admin => {
+      const adminNorm = normalizeJID(admin);
+      const adminClean = extractNumber(adminNorm).replace(/\D/g, '');
 
-   // 3. Untuk @lid: cek cache
-   if (lidCache[normalized] !== undefined) return lidCache[normalized];
-
-   // 4. Untuk @lid: scan store contacts (makeInMemoryStore)
-   if (normalized.endsWith('@lid')) {
-      console.log(`[WA] Cek @lid di store: ${normalized}`);
-      // Scan semua kontak di store, cari yang LID-nya cocok
-      syncAdminLIDsFromStore();
-      if (adminJIDSet.has(jid) || adminJIDSet.has(normalized)) return true;
-
-      // Belum ketemu, mark cache false sementara (akan di-clear saat contacts update)
-      console.log(`[WA] ⚠️ LID ${normalized} belum ada di store, minta admin kirim /mynumber`);
+      if (admin === jid || adminNorm === normalized) return true;
+      if (adminClean && numClean && adminClean === numClean) return true;
       return false;
-   }
-
-   return false;
+   });
 }
 
 // Helper: kirim pesan WA
@@ -702,19 +661,26 @@ async function sendWA(jid, text) {
 // Helper: notifikasi ke semua WA admin lain (kecuali sender)
 async function notifyOtherWAAdmins(senderJID, notifMessage) {
    const normalizedSender = normalizeJID(senderJID);
-   // Cari nomor pengirim dari JID mapping
-   const senderNum = (jidToAdminNum[senderJID] || jidToAdminNum[normalizedSender] || '').replace(/\D/g, '');
    const senderDigits = extractNumber(normalizedSender).replace(/\D/g, '');
 
-   console.log(`[WA] Notif dari ${senderJID} → num: ${senderNum || senderDigits}`);
+   console.log(`[WA] Notif dari ${senderJID}`);
 
-   for (const adminNum of WA_ADMIN_NUMBERS) {
-      const adminClean = adminNum.replace(/\D/g, '');
-      if (senderNum && adminClean === senderNum) { console.log(`[WA] Skip sender (${adminClean})`); continue; }
-      if (!senderNum && adminClean === senderDigits) { console.log(`[WA] Skip sender digit (${adminClean})`); continue; }
-      const adminJID = toJID(adminNum);
-      console.log(`[WA] → Notif ke ${adminClean}`);
-      await sendWA(adminJID, notifMessage);
+   for (const admin of ALL_WA_ADMINS) {
+      const adminNorm = normalizeJID(admin);
+      const adminClean = extractNumber(adminNorm).replace(/\D/g, '');
+
+      if (admin === senderJID || adminNorm === normalizedSender) {
+         console.log(`[WA] Skip sender (${admin})`);
+         continue;
+      }
+      if (senderDigits && adminClean && adminClean === senderDigits) {
+         console.log(`[WA] Skip sender digit (${adminClean})`);
+         continue;
+      }
+
+      const targetJID = admin.includes('@') ? admin : toJID(admin);
+      console.log(`[WA] → Notif ke admin ${targetJID}`);
+      await sendWA(targetJID, notifMessage);
    }
 }
 
@@ -758,23 +724,33 @@ async function handleWAMessage(sock, message) {
       if (!text) return;
 
       const senderJID = normalizeJID(jid); // normalize: strip device suffix (:1, :2)
-      const senderNumber = senderJID.replace('@s.whatsapp.net', '');
+      const senderNumber = extractNumber(senderJID);
       const senderName = msg.pushName || senderNumber;
+      const lower = text.trim();
 
-      // Cek akses (async — support LID resolve)
-      if (WA_ADMIN_NUMBERS.length > 0 && !(await isWAAdminAsync(sock, senderJID))) {
-         for (const adminNum of WA_ADMIN_NUMBERS) {
-            await sendWA(toJID(adminNum),
-               `⚠️ Aktivitas Tidak Dikenal\n\nUser: ${senderName}\nNomor: ${senderNumber}\nPesan: ${text}`
+      // ===== /mynumber atau /myid — bisa diakses SIAPA SAJA tanpa cek admin =====
+      if (/^\/(mynumber|myid|jid)$/i.test(lower)) {
+         return sendWA(senderJID, `📱 WhatsApp ID Anda:
+JID: ${senderJID}
+Nomor: ${senderNumber}
+
+Jika Anda admin dan akses ditolak, tambahkan JID di atas ke WA_ADMIN_NUMBERS atau WA_ADMIN_LIDS di file .env:
+WA_ADMIN_NUMBERS=${senderJID}`);
+      }
+
+      // Cek akses
+      if (ALL_WA_ADMINS.length > 0 && !isWAAdmin(senderJID)) {
+         for (const admin of ALL_WA_ADMINS) {
+            const targetJID = admin.includes('@') ? admin : toJID(admin);
+            await sendWA(targetJID,
+               `⚠️ Aktivitas Tidak Dikenal\n\nUser: ${senderName}\nJID: ${senderJID}\nPesan: ${text}`
             );
          }
-         await sendWA(senderJID, '⛔ Maaf, Anda tidak memiliki akses untuk menggunakan bot ini.');
+         await sendWA(senderJID, `⛔ Maaf, Anda tidak memiliki akses untuk menggunakan bot ini.\n\nKetik /myid untuk melihat JID WhatsApp Anda.`);
          return;
       }
 
-      console.log(`[WA] Pesan dari ${senderName} (${senderNumber}): ${text}`);
-
-      const lower = text.trim();
+      console.log(`[WA] Pesan dari ${senderName} (${senderJID}): ${text}`);
 
       // ===== /start atau /help =====
       if (/^\/(start|help)$/i.test(lower)) {
@@ -809,106 +785,106 @@ async function handleWAMessage(sock, message) {
 
 ✖️ X ACCOUNT
 /x Nama | Username | Email | Status | Link
-/xlist - Semua X tercatat
+/xlist - Semua X account
 /xedit <nomor> <field> <value>
 /xdelete <nomor>
 
-Contoh:
-/add Capcut | 1 bulan | 8000
-/spend Makan | Beli nasi padang | 15000
-/email test@gmail.com | pass123 | Email utama`;
+ℹ️ AKUN & BOT
+/myid - Cek ID WhatsApp Anda`;
          return sendWA(senderJID, helpText);
       }
 
-      // ===== /add =====
-      if (/^\/add\s+.+/i.test(lower)) {
-         const raw = text.slice(4).trim();
-         const parts = raw.split('|').map(s => s.trim()).filter(Boolean);
-         if (parts.length < 3) return sendWA(senderJID, 'Format salah.\nPakai:\n/add Aplikasi | Jenis | Laba\nContoh: /add Canva | lifetime | 15000');
-         const aplikasi = parts[0]; const jenis = parts[1]; const laba = parseIDR(parts[2]);
-         if (!aplikasi || !jenis || !isFinite(laba) || laba <= 0) return sendWA(senderJID, 'Format salah. Laba harus angka positif.');
+      // ===== /add <aplikasi> | <jenis> | <laba> =====
+      const addMatch = text.match(/^\/add\s+(.+)/i);
+      if (addMatch) {
+         const parts = addMatch[1].split('|').map((s) => s.trim()).filter(Boolean);
+         if (parts.length < 3) {
+            return sendWA(senderJID, '❌ Format salah.\nPakai:\n/add Aplikasi | Jenis | Laba\n\n*Contoh:*\n/add YouTube | Premium 1 Bulan | 15000');
+         }
+         const laba = parseIDR(parts[2]);
+         if (isNaN(laba)) return sendWA(senderJID, '❌ Nominal laba tidak valid.');
 
-         const result = await callApiWA(senderJID, 'post', '/incomes', { aplikasi, jenis, laba, source_user: senderName });
+         const result = await callApiWA(senderJID, 'post', '/notes', { aplikasi: parts[0], jenis: parts[1], laba, source_user: senderName });
          if (result) {
-            let monthCount = '?'; let monthTotal = 0;
-            try {
-               const monthRes = await api.get('/incomes/month');
-               const monthData = monthRes.data;
-               if (monthData.count !== undefined) monthCount = monthData.count;
-               else if (monthData.data && Array.isArray(monthData.data)) monthCount = monthData.data.length;
-               else if (Array.isArray(monthData)) monthCount = monthData.length;
-               if (monthData.total !== undefined) monthTotal = monthData.total;
-               else if (monthData.data && Array.isArray(monthData.data)) monthTotal = monthData.data.reduce((sum, item) => sum + (Number(item.laba) || 0), 0);
-               else if (Array.isArray(monthData)) monthTotal = monthData.reduce((sum, item) => sum + (Number(item.laba) || 0), 0);
-            } catch (err) { console.error('Gagal ambil data bulan ini:', err.message); }
-
-            const bulanIni = new Date().toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
-            await sendWA(senderJID, `📊 Total Transaksi ${bulanIni}: ${monthCount} transaksi\n💰 Total Laba: Rp ${formatIDR(monthTotal)}`);
-            await notifyOtherWAAdmins(senderJID, `📥 Pemasukan Baru oleh ${senderName}\n\n📱 Aplikasi: ${aplikasi}\n📦 Jenis: ${jenis}\n💰 Laba: Rp ${formatIDR(laba)}\n\n📊 Total Transaksi ${bulanIni}: ${monthCount} transaksi\n💰 Total Laba: Rp ${formatIDR(monthTotal)}`);
+            await notifyOtherWAAdmins(senderJID, `🟢 *Transaksi Baru* oleh ${senderName}\n\n📱 Aplikasi: *${parts[0]}*\n📝 Jenis: ${parts[1]}\n💵 Laba: *Rp ${formatIDR(laba)}*`);
          }
          return;
       }
 
       // ===== /today =====
-      if (/^\/today$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/today');
+      if (/^\/today$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/today');
 
       // ===== /yesterday =====
-      if (/^\/yesterday$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/yesterday');
+      if (/^\/yesterday$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/yesterday');
 
       // ===== /week =====
-      if (/^\/week$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/week');
+      if (/^\/week$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/week');
 
       // ===== /month =====
-      if (/^\/month$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/month');
+      if (/^\/month$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/month');
 
       // ===== /list =====
-      if (/^\/list$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes');
+      if (/^\/list$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes');
 
       // ===== /summary =====
-      if (/^\/summary$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/summary');
+      if (/^\/summary$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/summary');
 
       // ===== /top =====
-      if (/^\/top$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/top');
+      if (/^\/top$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/top');
 
       // ===== /stats =====
-      if (/^\/stats$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/stats');
+      if (/^\/stats$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/stats');
+
+      // ===== /undo =====
+      if (/^\/undo$/i.test(lower)) {
+         const result = await callApiWA(senderJID, 'post', '/notes/undo');
+         if (result) await notifyOtherWAAdmins(senderJID, `↩️ *Transaksi Terakhir Dibatalkan* oleh ${senderName}`);
+         return;
+      }
 
       // ===== /edit <id> <field> <value> =====
       const editMatch = lower.match(/^\/edit\s+(\d+)\s+(\w+)\s+(.+)/i);
       if (editMatch) {
-         const id = editMatch[1]; const field = editMatch[2].toLowerCase(); const value = editMatch[3].trim();
+         const id = editMatch[1];
+         const field = editMatch[2].toLowerCase();
+         let value = editMatch[3].trim();
          const validFields = ['aplikasi', 'jenis', 'laba'];
-         if (!validFields.includes(field)) return sendWA(senderJID, `❌ Field tidak valid. Gunakan: aplikasi, jenis, atau laba\n\nContoh:\n/edit 3 aplikasi Canva\n/edit 3 jenis lifetime\n/edit 3 laba 10000`);
-         const data = {}; data[field] = field === 'laba' ? parseIDR(value) : value;
-         const result = await callApiWA(senderJID, 'put', `/incomes/${id}`, data);
-         if (result) await notifyOtherWAAdmins(senderJID, `✏️ Edit Pemasukan #${id} oleh ${senderName}\n\n📝 ${field}: ${value}`);
-         return;
-      }
+         if (!validFields.includes(field)) {
+            return sendWA(senderJID, `❌ Field tidak valid. Gunakan: aplikasi, jenis, atau laba`);
+         }
+         if (field === 'laba') value = parseIDR(value);
+         const data = {};
+         data[field] = value;
 
-      // ===== /undo =====
-      if (/^\/undo$/i.test(lower)) {
-         const result = await callApiWA(senderJID, 'delete', '/incomes/last');
-         if (result) await notifyOtherWAAdmins(senderJID, `↩️ Undo Pemasukan Terakhir oleh ${senderName}`);
+         const result = await callApiWA(senderJID, 'put', `/notes/${id}`, data);
+         if (result) {
+            await notifyOtherWAAdmins(senderJID, `✏️ *Edit Transaksi #${id}* oleh ${senderName}\n\n📝 ${field}: *${typeof value === 'number' ? 'Rp ' + formatIDR(value) : value}*`);
+         }
          return;
       }
 
       // ===== /delete <id> =====
       const deleteMatch = lower.match(/^\/delete\s+(\d+)/i);
       if (deleteMatch) {
-         const result = await callApiWA(senderJID, 'delete', `/incomes/${deleteMatch[1]}`);
-         if (result) await notifyOtherWAAdmins(senderJID, `🗑️ Hapus Pemasukan #${deleteMatch[1]} oleh ${senderName}`);
+         const result = await callApiWA(senderJID, 'delete', `/notes/${deleteMatch[1]}`);
+         if (result) await notifyOtherWAAdmins(senderJID, `🗑️ *Hapus Transaksi #${deleteMatch[1]}* oleh ${senderName}`);
          return;
       }
 
-      // ===== /spend =====
-      if (/^\/spend\s+.+/i.test(lower)) {
-         const raw = text.slice(6).trim();
-         const parts = raw.split('|').map(s => s.trim()).filter(Boolean);
-         if (parts.length < 3) return sendWA(senderJID, '❌ Format salah.\nPakai:\n/spend Kategori | Keterangan | Nominal\n\nContoh:\n/spend Makan | Beli nasi padang | 15000');
-         const kategori = parts[0]; const keterangan = parts[1]; const nominal = parseIDR(parts[2]);
-         if (!kategori || !keterangan || !isFinite(nominal) || nominal <= 0) return sendWA(senderJID, '❌ Format salah. Nominal harus angka positif.');
-         const result = await callApiWA(senderJID, 'post', '/expenses', { kategori, keterangan, nominal, source_user: senderName });
-         if (result) await notifyOtherWAAdmins(senderJID, `💸 Pengeluaran Baru oleh ${senderName}\n\n📂 Kategori: ${kategori}\n📝 Keterangan: ${keterangan}\n💵 Nominal: Rp ${formatIDR(nominal)}`);
+      // ===== /spend <kategori> | <keterangan> | <nominal> =====
+      const spendMatch = text.match(/^\/spend\s+(.+)/i);
+      if (spendMatch) {
+         const parts = spendMatch[1].split('|').map((s) => s.trim()).filter(Boolean);
+         if (parts.length < 3) {
+            return sendWA(senderJID, '❌ Format salah.\nPakai:\n/spend Kategori | Keterangan | Nominal\n\n*Contoh:*\n/spend Operasional | Beli Server VPS | 50000');
+         }
+         const nominal = parseIDR(parts[2]);
+         if (isNaN(nominal)) return sendWA(senderJID, '❌ Nominal pengeluaran tidak valid.');
+
+         const result = await callApiWA(senderJID, 'post', '/expenses', { kategori: parts[0], keterangan: parts[1], nominal, source_user: senderName });
+         if (result) {
+            await notifyOtherWAAdmins(senderJID, `🔴 *Pengeluaran Baru* oleh ${senderName}\n\n🏷️ Kategori: *${parts[0]}*\n📝 Keterangan: ${parts[1]}\n💸 Nominal: *Rp ${formatIDR(nominal)}*`);
+         }
          return;
       }
 
@@ -925,17 +901,19 @@ Contoh:
       const spendDeleteMatch = lower.match(/^\/spenddelete\s+(\d+)/i);
       if (spendDeleteMatch) {
          const result = await callApiWA(senderJID, 'delete', `/expenses/${spendDeleteMatch[1]}`);
-         if (result) await notifyOtherWAAdmins(senderJID, `🗑️ Hapus Pengeluaran #${spendDeleteMatch[1]} oleh ${senderName}`);
+         if (result) await notifyOtherWAAdmins(senderJID, `🗑️ *Hapus Pengeluaran #${spendDeleteMatch[1]}* oleh ${senderName}`);
          return;
       }
 
-      // ===== /email =====
-      if (/^\/email\s+.+/i.test(lower)) {
-         const raw = text.slice(6).trim();
-         const parts = raw.split('|').map(s => s.trim()).filter(Boolean);
-         if (parts.length < 3) return sendWA(senderJID, '❌ Format salah.\nPakai:\n/email Akun | Password | Keterangan\n\nContoh:\n/email test@gmail.com | password123 | Email utama');
+      // ===== /email <akun> | <password> | <keterangan> =====
+      const emailMatch = text.match(/^\/email\s+(.+)/i);
+      if (emailMatch) {
+         const parts = emailMatch[1].split('|').map((s) => s.trim()).filter(Boolean);
+         if (parts.length < 3) {
+            return sendWA(senderJID, '❌ Format salah.\nPakai:\n/email Akun | Password | Keterangan\n\n*Contoh:*\n/email john@gmail.com | pass123 | Email cadangan toko');
+         }
          const result = await callApiWA(senderJID, 'post', '/emails', { akun: parts[0], password: parts[1], keterangan: parts[2], source_user: senderName });
-         if (result) await notifyOtherWAAdmins(senderJID, `📧 Email Baru Ditambahkan oleh ${senderName}\n\n📬 Akun: ${parts[0]}\n📝 Keterangan: ${parts[2]}`);
+         if (result) await notifyOtherWAAdmins(senderJID, `📧 *Email Baru Ditambahkan* oleh ${senderName}\n\n📬 Akun: *${parts[0]}*\n📝 Keterangan: ${parts[2]}`);
          return;
       }
 
@@ -950,7 +928,7 @@ Contoh:
          if (!validFields.includes(field)) return sendWA(senderJID, `❌ Field tidak valid. Gunakan: akun, password, atau keterangan`);
          const data = {}; data[field] = value;
          const result = await callApiWA(senderJID, 'put', `/emails/${id}`, data);
-         if (result) await notifyOtherWAAdmins(senderJID, `✏️ Edit Email #${id} oleh ${senderName}\n\n📝 ${field}: ${value}`);
+         if (result) await notifyOtherWAAdmins(senderJID, `✏️ *Edit Email #${id}* oleh ${senderName}\n\n📝 ${field}: *${value}*`);
          return;
       }
 
@@ -958,17 +936,19 @@ Contoh:
       const emailDeleteMatch = lower.match(/^\/emaildelete\s+(\d+)/i);
       if (emailDeleteMatch) {
          const result = await callApiWA(senderJID, 'delete', `/emails/${emailDeleteMatch[1]}`);
-         if (result) await notifyOtherWAAdmins(senderJID, `🗑️ Hapus Email #${emailDeleteMatch[1]} oleh ${senderName}`);
+         if (result) await notifyOtherWAAdmins(senderJID, `🗑️ *Hapus Email #${emailDeleteMatch[1]}* oleh ${senderName}`);
          return;
       }
 
-      // ===== /x =====
-      if (/^\/x\s+.+/i.test(lower)) {
-         const raw = text.slice(3).trim();
-         const parts = raw.split('|').map(s => s.trim()).filter(Boolean);
-         if (parts.length < 5) return sendWA(senderJID, '❌ Format salah.\nPakai:\n/x Nama | Username | Email | Status | Link\n\nContoh:\n/x Akun Pribadi | @johndoe | john@gmail.com | Aktif | https://x.com/johndoe');
+      // ===== /x <nama> | <username> | <email> | <status> | <link> =====
+      const xMatch = text.match(/^\/x\s+(.+)/i);
+      if (xMatch) {
+         const parts = xMatch[1].split('|').map((s) => s.trim()).filter(Boolean);
+         if (parts.length < 5) {
+            return sendWA(senderJID, '❌ Format salah.\nPakai:\n/x Nama | Username | Email | Status | Link\n\n*Contoh:*\n/x Akun Pribadi | @johndoe | john@gmail.com | Aktif | https://x.com/johndoe');
+         }
          const result = await callApiWA(senderJID, 'post', '/x-accounts', { nama: parts[0], username: parts[1], email: parts[2], status: parts[3], link: parts[4], source_user: senderName });
-         if (result) await notifyOtherWAAdmins(senderJID, `✖️ X Account Baru Ditambahkan oleh ${senderName}\n\n👤 Nama: ${parts[0]}\n🔗 Username: ${parts[1]}`);
+         if (result) await notifyOtherWAAdmins(senderJID, `✖️ *X Account Baru Ditambahkan* oleh ${senderName}\n\n👤 Nama: *${parts[0]}*\n🔗 Username: ${parts[1]}`);
          return;
       }
 
@@ -983,7 +963,7 @@ Contoh:
          if (!validFields.includes(field)) return sendWA(senderJID, `❌ Field tidak valid. Gunakan: nama, username, email, status, atau link`);
          const data = {}; data[field] = value;
          const result = await callApiWA(senderJID, 'put', `/x-accounts/${id}`, data);
-         if (result) await notifyOtherWAAdmins(senderJID, `✏️ Edit X Account #${id} oleh ${senderName}\n\n📝 ${field}: ${value}`);
+         if (result) await notifyOtherWAAdmins(senderJID, `✏️ *Edit X Account #${id}* oleh ${senderName}\n\n📝 ${field}: *${value}*`);
          return;
       }
 
@@ -991,13 +971,8 @@ Contoh:
       const xDeleteMatch = lower.match(/^\/xdelete\s+(\d+)/i);
       if (xDeleteMatch) {
          const result = await callApiWA(senderJID, 'delete', `/x-accounts/${xDeleteMatch[1]}`);
-         if (result) await notifyOtherWAAdmins(senderJID, `🗑️ Hapus X Account #${xDeleteMatch[1]} oleh ${senderName}`);
+         if (result) await notifyOtherWAAdmins(senderJID, `🗑️ *Hapus X Account #${xDeleteMatch[1]}* oleh ${senderName}`);
          return;
-      }
-
-      // ===== /mynumber =====
-      if (/^\/mynumber$/i.test(lower)) {
-         return sendWA(senderJID, `📱 Nomor WA Anda: ${senderNumber}\n\nMasukkan nomor ini ke WA_ADMIN_NUMBERS di file .env (tanpa +, contoh: 6281234567890). Pisahkan dengan koma jika lebih dari satu admin.`);
       }
 
    } catch (err) {
@@ -1008,7 +983,6 @@ Contoh:
 
 // ===== INIT WHATSAPP BOT =====
 async function startWABot() {
-   // Pastikan folder session ada
    if (!fs.existsSync(WA_SESSION_DIR)) {
       fs.mkdirSync(WA_SESSION_DIR, { recursive: true });
    }
@@ -1027,7 +1001,6 @@ async function startWABot() {
    });
 
    waSocket = sock;
-   waStore.bind(sock.ev);
 
    // Event: QR Code
    sock.ev.on('connection.update', async (update) => {
@@ -1055,11 +1028,10 @@ async function startWABot() {
          }
       } else if (connection === 'open') {
          console.log('✅ WhatsApp Bot terhubung!');
-         if (WA_ADMIN_NUMBERS.length === 0) {
-            console.log('⚠️  WA_ADMIN_NUMBERS belum diset di .env. Semua pengguna bisa akses bot!');
-            console.log('    Kirim /mynumber ke WA bot untuk mendapatkan nomor Anda.');
+         if (ALL_WA_ADMINS.length === 0) {
+            console.log('⚠️  WA_ADMIN_NUMBERS / WA_ADMIN_LIDS belum diset di .env. Semua pengguna bisa akses bot!');
+            console.log('    Kirim /myid ke WA bot untuk mendapatkan ID Anda.');
          } else {
-            // Resolve nomor admin ke JID (penting untuk handle @lid)
             await buildAdminJIDSet(sock);
          }
       }
@@ -1067,10 +1039,6 @@ async function startWABot() {
 
    // Event: Simpan credentials
    sock.ev.on('creds.update', saveCreds);
-
-   // Event: Contacts update — scan ulang LID admin saat contacts di-update
-   sock.ev.on('contacts.upsert', () => syncAdminLIDsFromStore());
-   sock.ev.on('contacts.update', () => syncAdminLIDsFromStore());
 
    // Event: Pesan masuk
    sock.ev.on('messages.upsert', (message) => handleWAMessage(sock, message));
