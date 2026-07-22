@@ -569,22 +569,51 @@ function toJID(number) {
    return `${clean}@s.whatsapp.net`;
 }
 
-// Helper: ekstrak nomor bersih dari JID (handle @s.whatsapp.net, @c.us, @lid)
-function extractNumber(jid) {
-   return jid.replace(/@s\.whatsapp\.net|@c\.us|@lid/g, '');
+// Set JID admin yang sudah di-resolve (isi saat bot connect)
+// Ini untuk handle @lid format di WhatsApp multi-device
+const adminJIDSet = new Set();
+// Map: resolved JID → nomor asli (untuk skip sender)
+const jidToAdminNum = {};
+
+// Resolve semua nomor admin ke JID yang sesungguhnya via sock.onWhatsApp()
+async function buildAdminJIDSet(sock) {
+   if (WA_ADMIN_NUMBERS.length === 0) return;
+   console.log('[WA] Resolving nomor admin ke JID...');
+   for (const adminNum of WA_ADMIN_NUMBERS) {
+      try {
+         const results = await sock.onWhatsApp(adminNum);
+         if (results && results.length > 0) {
+            const resolvedJID = results[0].jid;
+            adminJIDSet.add(resolvedJID);
+            // Juga tambahkan format @s.whatsapp.net standar sebagai fallback
+            adminJIDSet.add(toJID(adminNum));
+            jidToAdminNum[resolvedJID] = adminNum;
+            jidToAdminNum[toJID(adminNum)] = adminNum;
+            console.log(`[WA] ✅ Admin ${adminNum} → ${resolvedJID}`);
+         } else {
+            // Tidak ada di WA, pakai @s.whatsapp.net saja
+            adminJIDSet.add(toJID(adminNum));
+            jidToAdminNum[toJID(adminNum)] = adminNum;
+            console.warn(`[WA] ⚠️ Nomor ${adminNum} tidak ditemukan di WA, pakai JID standar`);
+         }
+      } catch (err) {
+         console.error(`[WA] ❌ Gagal resolve JID untuk ${adminNum}:`, err.message);
+         // Fallback ke format standar
+         adminJIDSet.add(toJID(adminNum));
+         jidToAdminNum[toJID(adminNum)] = adminNum;
+      }
+   }
+   console.log('[WA] Admin JIDs:', [...adminJIDSet]);
 }
 
 // Helper: cek apakah JID adalah admin
-// Mendukung format @s.whatsapp.net, @c.us, maupun @lid (WhatsApp multi-device)
 function isWAAdmin(jid) {
    if (WA_ADMIN_NUMBERS.length === 0) return true;
-   const number = extractNumber(jid);
-   // Cek langsung dan cek dengan format 62 vs 0
-   return WA_ADMIN_NUMBERS.some(admin => {
-      const adminClean = admin.replace(/\D/g, '');
-      const numClean = number.replace(/\D/g, '');
-      return adminClean === numClean;
-   });
+   // Cek di resolved JID set
+   if (adminJIDSet.has(jid)) return true;
+   // Fallback: cek berdasarkan nomor bersih (untuk @s.whatsapp.net)
+   const numClean = extractNumber(jid).replace(/\D/g, '');
+   return WA_ADMIN_NUMBERS.some(admin => admin.replace(/\D/g, '') === numClean);
 }
 
 // Helper: kirim pesan WA
@@ -601,19 +630,28 @@ async function sendWA(jid, text) {
    }
 }
 
-// Helper: notifikasi ke semua WA admin lain
-// Bandingkan nomor bersih, bukan full JID (karena sender bisa @lid, admin list pakai angka)
+// Helper: notifikasi ke semua WA admin lain (kecuali sender)
 async function notifyOtherWAAdmins(senderJID, notifMessage) {
-   const senderNum = extractNumber(senderJID).replace(/\D/g, '');
-   console.log(`[WA] Notif dari ${senderNum} ke admin lain (total admin: ${WA_ADMIN_NUMBERS.length})`);
+   // Cari nomor pengirim dari JID (bisa @lid, @s.whatsapp.net, dll)
+   const senderNum = (jidToAdminNum[senderJID] || '').replace(/\D/g, '');
+   // Juga coba match berdasarkan digit JID sebagai fallback
+   const senderDigits = extractNumber(senderJID).replace(/\D/g, '');
+
+   console.log(`[WA] Notif dari ${senderJID} (num: ${senderNum || senderDigits}) ke admin lain (total: ${WA_ADMIN_NUMBERS.length})`);
+
    for (const adminNum of WA_ADMIN_NUMBERS) {
       const adminClean = adminNum.replace(/\D/g, '');
-      if (adminClean === senderNum) {
-         console.log(`[WA] Skip notif ke sender sendiri (${adminClean})`);
+      // Skip jika admin ini adalah sender (cek dua cara)
+      if (senderNum && adminClean === senderNum) {
+         console.log(`[WA] Skip sender sendiri (${adminClean})`);
+         continue;
+      }
+      if (!senderNum && adminClean === senderDigits) {
+         console.log(`[WA] Skip sender sendiri via digit match (${adminClean})`);
          continue;
       }
       const adminJID = toJID(adminNum);
-      console.log(`[WA] Mengirim notif ke admin ${adminClean}...`);
+      console.log(`[WA] Mengirim notif ke admin ${adminClean} (${adminJID})...`);
       await sendWA(adminJID, notifMessage);
    }
 }
@@ -956,6 +994,9 @@ async function startWABot() {
          if (WA_ADMIN_NUMBERS.length === 0) {
             console.log('⚠️  WA_ADMIN_NUMBERS belum diset di .env. Semua pengguna bisa akses bot!');
             console.log('    Kirim /mynumber ke WA bot untuk mendapatkan nomor Anda.');
+         } else {
+            // Resolve nomor admin ke JID (penting untuk handle @lid)
+            await buildAdminJIDSet(sock);
          }
       }
    });
