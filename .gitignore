@@ -8,6 +8,9 @@ node_modules/
 credentials.json
 credentials/
 
+# WhatsApp Bot Session (Baileys)
+wa_session/
+
 # Deployment files
 DEPLOY.md
 
