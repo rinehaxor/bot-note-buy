@@ -569,6 +569,13 @@ function toJID(number) {
    return `${clean}@s.whatsapp.net`;
 }
 
+// Helper: normalisasi JID — strip device suffix (:1, :2, dll)
+// Contoh: 75519232086065:1@lid → 75519232086065@lid
+function normalizeJID(jid) {
+   if (!jid) return jid;
+   return jid.replace(/(:\d+)(@)/, '$2');
+}
+
 // Set JID admin yang sudah di-resolve (isi saat bot connect)
 // Ini untuk handle @lid format di WhatsApp multi-device
 const adminJIDSet = new Set();
@@ -614,10 +621,11 @@ function extractNumber(jid) {
 // Helper: cek apakah JID adalah admin
 function isWAAdmin(jid) {
    if (WA_ADMIN_NUMBERS.length === 0) return true;
-   // Cek di resolved JID set (hasil sock.onWhatsApp)
-   if (adminJIDSet.has(jid)) return true;
-   // Fallback: cek berdasarkan nomor bersih (untuk @s.whatsapp.net)
-   const numClean = extractNumber(jid).replace(/\D/g, '');
+   const normalized = normalizeJID(jid);
+   // Cek di resolved JID set (termasuk LID yang sudah di-map)
+   if (adminJIDSet.has(jid) || adminJIDSet.has(normalized)) return true;
+   // Fallback: cek berdasarkan nomor bersih (hanya berlaku untuk @s.whatsapp.net)
+   const numClean = extractNumber(normalized).replace(/\D/g, '');
    return WA_ADMIN_NUMBERS.some(admin => admin.replace(/\D/g, '') === numClean);
 }
 
@@ -637,26 +645,19 @@ async function sendWA(jid, text) {
 
 // Helper: notifikasi ke semua WA admin lain (kecuali sender)
 async function notifyOtherWAAdmins(senderJID, notifMessage) {
-   // Cari nomor pengirim dari JID (bisa @lid, @s.whatsapp.net, dll)
-   const senderNum = (jidToAdminNum[senderJID] || '').replace(/\D/g, '');
-   // Juga coba match berdasarkan digit JID sebagai fallback
-   const senderDigits = extractNumber(senderJID).replace(/\D/g, '');
+   const normalizedSender = normalizeJID(senderJID);
+   // Cari nomor pengirim dari JID mapping
+   const senderNum = (jidToAdminNum[senderJID] || jidToAdminNum[normalizedSender] || '').replace(/\D/g, '');
+   const senderDigits = extractNumber(normalizedSender).replace(/\D/g, '');
 
-   console.log(`[WA] Notif dari ${senderJID} (num: ${senderNum || senderDigits}) ke admin lain (total: ${WA_ADMIN_NUMBERS.length})`);
+   console.log(`[WA] Notif dari ${senderJID} → num: ${senderNum || senderDigits}`);
 
    for (const adminNum of WA_ADMIN_NUMBERS) {
       const adminClean = adminNum.replace(/\D/g, '');
-      // Skip jika admin ini adalah sender (cek dua cara)
-      if (senderNum && adminClean === senderNum) {
-         console.log(`[WA] Skip sender sendiri (${adminClean})`);
-         continue;
-      }
-      if (!senderNum && adminClean === senderDigits) {
-         console.log(`[WA] Skip sender sendiri via digit match (${adminClean})`);
-         continue;
-      }
+      if (senderNum && adminClean === senderNum) { console.log(`[WA] Skip sender (${adminClean})`); continue; }
+      if (!senderNum && adminClean === senderDigits) { console.log(`[WA] Skip sender digit (${adminClean})`); continue; }
       const adminJID = toJID(adminNum);
-      console.log(`[WA] Mengirim notif ke admin ${adminClean} (${adminJID})...`);
+      console.log(`[WA] → Notif ke ${adminClean}`);
       await sendWA(adminJID, notifMessage);
    }
 }
@@ -700,7 +701,7 @@ async function handleWAMessage(sock, message) {
 
       if (!text) return;
 
-      const senderJID = jid;
+      const senderJID = normalizeJID(jid); // normalize: strip device suffix (:1, :2)
       const senderNumber = senderJID.replace('@s.whatsapp.net', '');
       const senderName = msg.pushName || senderNumber;
 
@@ -1008,6 +1009,28 @@ async function startWABot() {
 
    // Event: Simpan credentials
    sock.ev.on('creds.update', saveCreds);
+
+   // Event: Contacts update — tangkap LID admin dari kontak yang dikenal WA
+   sock.ev.on('contacts.upsert', (contacts) => {
+      for (const contact of contacts) {
+         const contactJID = contact.id || '';
+         // Cek apakah ini kontak admin (berdasarkan nomor @s.whatsapp.net)
+         if (!contactJID.endsWith('@s.whatsapp.net') && !contactJID.endsWith('@c.us')) continue;
+         const contactNum = contactJID.replace(/@s\.whatsapp\.net|@c\.us/g, '').replace(/\D/g, '');
+         const matchedAdmin = WA_ADMIN_NUMBERS.find(n => n.replace(/\D/g, '') === contactNum);
+         if (!matchedAdmin) continue;
+
+         // Jika kontak ini punya LID, tambahkan ke adminJIDSet
+         if (contact.lid) {
+            const normalizedLid = normalizeJID(contact.lid);
+            adminJIDSet.add(contact.lid);
+            adminJIDSet.add(normalizedLid);
+            jidToAdminNum[contact.lid] = matchedAdmin;
+            jidToAdminNum[normalizedLid] = matchedAdmin;
+            console.log(`[WA] Admin LID dari contacts: ${matchedAdmin} → ${contact.lid}`);
+         }
+      }
+   });
 
    // Event: Pesan masuk
    sock.ev.on('messages.upsert', (message) => handleWAMessage(sock, message));
