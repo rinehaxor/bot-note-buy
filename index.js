@@ -1005,8 +1005,6 @@ Contoh:
    }
 }
 
-// Global Store
-const waStore = makeInMemoryStore({});
 
 // ===== INIT WHATSAPP BOT =====
 async function startWABot() {
