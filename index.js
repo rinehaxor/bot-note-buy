@@ -802,42 +802,60 @@ WA_ADMIN_NUMBERS=${senderJID}`);
             return sendWA(senderJID, '❌ Format salah.\nPakai:\n/add Aplikasi | Jenis | Laba\n\n*Contoh:*\n/add YouTube | Premium 1 Bulan | 15000');
          }
          const laba = parseIDR(parts[2]);
-         if (isNaN(laba)) return sendWA(senderJID, '❌ Nominal laba tidak valid.');
+         if (isNaN(laba) || laba <= 0) return sendWA(senderJID, '❌ Nominal laba tidak valid.');
 
-         const result = await callApiWA(senderJID, 'post', '/notes', { aplikasi: parts[0], jenis: parts[1], laba, source_user: senderName });
+         const result = await callApiWA(senderJID, 'post', '/incomes', { aplikasi: parts[0], jenis: parts[1], laba, source_user: senderName });
          if (result) {
-            await notifyOtherWAAdmins(senderJID, `🟢 *Transaksi Baru* oleh ${senderName}\n\n📱 Aplikasi: *${parts[0]}*\n📝 Jenis: ${parts[1]}\n💵 Laba: *Rp ${formatIDR(laba)}*`);
+            let monthCount = '?';
+            let monthTotal = 0;
+            try {
+               const monthRes = await api.get('/incomes/month');
+               const monthData = monthRes.data;
+               if (monthData.count !== undefined) monthCount = monthData.count;
+               else if (monthData.data && Array.isArray(monthData.data)) monthCount = monthData.data.length;
+               else if (Array.isArray(monthData)) monthCount = monthData.length;
+
+               if (monthData.total !== undefined) monthTotal = monthData.total;
+               else if (monthData.data && Array.isArray(monthData.data)) monthTotal = monthData.data.reduce((sum, item) => sum + (Number(item.laba) || 0), 0);
+               else if (Array.isArray(monthData)) monthTotal = monthData.reduce((sum, item) => sum + (Number(item.laba) || 0), 0);
+            } catch (err) {
+               console.error('Gagal ambil data bulan ini:', err.message);
+            }
+
+            const bulanIni = new Date().toLocaleDateString('id-ID', { month: 'long', year: 'numeric' });
+            await sendWA(senderJID, `📊 *Total Transaksi ${bulanIni}:* ${monthCount} transaksi\n💰 *Total Laba:* Rp ${formatIDR(monthTotal)}`);
+            await notifyOtherWAAdmins(senderJID, `📥 *Pemasukan Baru* oleh ${senderName}\n\n📱 Aplikasi: *${parts[0]}*\n📦 Jenis: ${parts[1]}\n💰 Laba: Rp ${formatIDR(laba)}\n\n📊 Total Transaksi ${bulanIni}: *${monthCount} transaksi*\n💰 Total Laba: Rp ${formatIDR(monthTotal)}`);
          }
          return;
       }
 
       // ===== /today =====
-      if (/^\/today$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/today');
+      if (/^\/today$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/today');
 
       // ===== /yesterday =====
-      if (/^\/yesterday$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/yesterday');
+      if (/^\/yesterday$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/yesterday');
 
       // ===== /week =====
-      if (/^\/week$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/week');
+      if (/^\/week$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/week');
 
       // ===== /month =====
-      if (/^\/month$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/month');
+      if (/^\/month$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/month');
 
       // ===== /list =====
-      if (/^\/list$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes');
+      if (/^\/list$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes');
 
       // ===== /summary =====
-      if (/^\/summary$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/summary');
+      if (/^\/summary$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/summary');
 
       // ===== /top =====
-      if (/^\/top$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/top');
+      if (/^\/top$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/top');
 
       // ===== /stats =====
-      if (/^\/stats$/i.test(lower)) return callApiWA(senderJID, 'get', '/notes/stats');
+      if (/^\/stats$/i.test(lower)) return callApiWA(senderJID, 'get', '/incomes/stats');
 
       // ===== /undo =====
       if (/^\/undo$/i.test(lower)) {
-         const result = await callApiWA(senderJID, 'post', '/notes/undo');
+         const result = await callApiWA(senderJID, 'delete', '/incomes/last');
          if (result) await notifyOtherWAAdmins(senderJID, `↩️ *Transaksi Terakhir Dibatalkan* oleh ${senderName}`);
          return;
       }
@@ -856,7 +874,7 @@ WA_ADMIN_NUMBERS=${senderJID}`);
          const data = {};
          data[field] = value;
 
-         const result = await callApiWA(senderJID, 'put', `/notes/${id}`, data);
+         const result = await callApiWA(senderJID, 'put', `/incomes/${id}`, data);
          if (result) {
             await notifyOtherWAAdmins(senderJID, `✏️ *Edit Transaksi #${id}* oleh ${senderName}\n\n📝 ${field}: *${typeof value === 'number' ? 'Rp ' + formatIDR(value) : value}*`);
          }
@@ -866,7 +884,7 @@ WA_ADMIN_NUMBERS=${senderJID}`);
       // ===== /delete <id> =====
       const deleteMatch = lower.match(/^\/delete\s+(\d+)/i);
       if (deleteMatch) {
-         const result = await callApiWA(senderJID, 'delete', `/notes/${deleteMatch[1]}`);
+         const result = await callApiWA(senderJID, 'delete', `/incomes/${deleteMatch[1]}`);
          if (result) await notifyOtherWAAdmins(senderJID, `🗑️ *Hapus Transaksi #${deleteMatch[1]}* oleh ${senderName}`);
          return;
       }
